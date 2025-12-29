@@ -100,6 +100,7 @@ int ServerRun(Server *srv) {
         // todo: error handle
         ServerHandleRequest(srv, ev_conn);
       } break;
+        // todo: handle connection end
       }
     }
   }
