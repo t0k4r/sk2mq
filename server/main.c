@@ -1,9 +1,11 @@
+#include "../common/mqproto.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 
@@ -49,6 +51,11 @@ int ServerAcceptConn(Server *srv) {
   int ret = epoll_ctl(srv->epollfd, EPOLL_CTL_ADD, sockfd, &ee);
   if (ret == -1)
     return errno;
+  char tmp[] = "user1";
+  mqPacket pckt = {.body_tag = MQPACKET_HELLO, .body_len = strlen(tmp)};
+
+  send(sockfd, &pckt, sizeof(pckt), 0);
+  send(sockfd, &tmp, strlen(tmp), 0);
   return 0;
 }
 int ServerHandleRequest(Server *srv, Conn *conn) {
