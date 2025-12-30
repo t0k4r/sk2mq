@@ -9,6 +9,9 @@
 
 #include <sys/socket.h>
 
+#include <unistd.h>
+#include <string.h>
+
 typedef struct mqMsgNode mqMsgNode;
 struct mqMsgNode {
   void *buf;
@@ -46,6 +49,7 @@ int mqClientInit(mqClient **client, char *addr, char *port) {
     return errno;
 
   // todo: proper handle
+  //printf("Received packet with tag %d\n", pckt.body_tag);
   assert(pckt.body_tag == MQPACKET_HELLO);
   new_client->client.prt = malloc(pckt.body_len);
   new_client->client.len = pckt.body_len;
@@ -59,13 +63,44 @@ int mqClientInit(mqClient **client, char *addr, char *port) {
   printf("%.*s", (int)new_client->client.len, new_client->client.prt);
 
   *client = new_client;
+  //close(new_client->sockfd);
   return 0;
 }
 void mqClientDeinit(mqClient **client) {}
-int mqClientCreate(mqClient *client, mqStr topic) {}
+int mqClientCreate(mqClient *client, mqStr topic) {
+  printf("%d\n", client->sockfd);
+  //connect(client->sockfd, NULL, 0);
+
+  mqmgmt_t topp = {.action = MQACTION_CREATE, .topic_len = topic.len};
+  mqPacket pckt = {.body_tag = MQPACKET_MGMT, .body_len = sizeof(mqmgmt_t)}; //body?
+
+  //memcpy(pckt.body, topic.ptr, topic.len);
+  send(client->sockfd, &pckt, sizeof(pckt), 0);
+  //send(client->sockfd, pckt.body, pckt.body_len, 0);
+  send(client->sockfd, &topp, sizeof(topp), 0);
+  send(client->sockfd, topic.prt, topic.len, 0);
+
+
+}
 int mqClientJoin(mqClient *client, mqStr topic) {}
 int mqClientQuit(mqClient *client, mqStr topic) {}
 int mqClientSend(mqClient *client, mqStr topic, mqStr msg,
-                 uint64_t due_timestamp) {}
+                 uint64_t due_timestamp) {
+                  mqPacket pckt = {.body_tag = MQPACKET_MSG, .body_len = sizeof(mqMsg)};//body?
+                  mqMsg msg_data = {0};
+                  msg_data.due_timestamp = due_timestamp;
+                  msg_data.msg.prt = msg.prt;
+                  msg_data.msg.len = msg.len;
+                  msg_data.topic.prt = topic.prt;
+                  msg_data.topic.len = topic.len;
+                  msg_data.client.prt = client->client.prt;
+                  msg_data.client.len = client->client.len;
+
+                  send(client->sockfd, &pckt, sizeof(pckt), 0);
+                  send(client->sockfd, &msg_data, sizeof(msg_data), 0);
+                  send(client->sockfd, msg_data.msg.prt, msg_data.msg.len, 0);
+                  send(client->sockfd, msg_data.topic.prt, msg_data.topic.len, 0);
+                  send(client->sockfd, msg_data.client.prt, msg_data.client.len, 0);
+                 }
 int mqClientRecv(mqClient *client, mqMsg **msg) {}
 int mqClientRecvFree(mqClient *client, mqMsg **msg) {}
