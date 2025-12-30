@@ -2,15 +2,17 @@
 #include "../common/mqproto.h"
 
 #include <assert.h>
+#include <endian.h>
 #include <errno.h>
 #include <netdb.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include <sys/socket.h>
 
-#include <unistd.h>
 #include <string.h>
+#include <unistd.h>
 
 typedef struct mqMsgNode mqMsgNode;
 struct mqMsgNode {
@@ -21,7 +23,7 @@ struct mqMsgNode {
 
 struct mqClient {
   int sockfd;
-  mqStr client;
+  mqStr name;
 };
 
 int mqClientInit(mqClient **client, char *addr, char *port) {
@@ -42,65 +44,75 @@ int mqClientInit(mqClient **client, char *addr, char *port) {
   if (ret == -1)
     return errno;
 
-  mqPacket pckt = {0};
+  uint8_t pckt_buf[MQPACKET_SIZE] = {0};
   // todo: handle not full read
-  ret = recv(new_client->sockfd, &pckt, sizeof(pckt), 0);
+  ret = recv(new_client->sockfd, pckt_buf, MQPACKET_SIZE, 0);
   if (ret == -1)
     return errno;
+  mqPacketHdr pckt = mqPacketHdrFrom(pckt_buf);
 
   // todo: proper handle
-  //printf("Received packet with tag %d\n", pckt.body_tag);
   assert(pckt.body_tag == MQPACKET_HELLO);
-  new_client->client.prt = malloc(pckt.body_len);
-  new_client->client.len = pckt.body_len;
+  new_client->name = (mqStr){
+      .prt = malloc(pckt.body_len),
+      .len = pckt.body_len,
+  };
 
   // todo: handle not full read
-  ret = recv(new_client->sockfd, new_client->client.prt,
-             sizeof(new_client->client.len), 0);
+  ret = recv(new_client->sockfd, new_client->name.prt,
+             sizeof(new_client->name.len), 0);
   if (ret == -1)
     return errno;
 
-  printf("%.*s", (int)new_client->client.len, new_client->client.prt);
-
+  printf("got name: %.*s", (int)new_client->name.len, new_client->name.prt);
   *client = new_client;
-  //close(new_client->sockfd);
   return 0;
 }
 void mqClientDeinit(mqClient **client) {}
 int mqClientCreate(mqClient *client, mqStr topic) {
-  printf("%d\n", client->sockfd);
-  //connect(client->sockfd, NULL, 0);
+  mqMgmtHdr mgmt = {.action = MQACTION_CREATE, .topic_len = topic.len};
+  uint8_t mgmt_buf[MQMGMT_SIZE] = {0};
+  mqMgmtHdrInto(mgmt, mgmt_buf);
 
-  mqmgmt_t topp = {.action = MQACTION_CREATE, .topic_len = topic.len};
-  mqPacket pckt = {.body_tag = MQPACKET_MGMT, .body_len = sizeof(mqmgmt_t)}; //body?
+  mqPacketHdr pckt = {.body_tag = MQPACKET_MGMT,
+                      .body_len = sizeof(mgmt_buf) + topic.len};
+  uint8_t pckt_buf[MQPACKET_SIZE] = {0};
+  mqPacketHdrInto(pckt, pckt_buf);
 
-  //memcpy(pckt.body, topic.ptr, topic.len);
-  send(client->sockfd, &pckt, sizeof(pckt), 0);
-  //send(client->sockfd, pckt.body, pckt.body_len, 0);
-  send(client->sockfd, &topp, sizeof(topp), 0);
+  // todo: handle send failure`
+  send(client->sockfd, pckt_buf, sizeof(pckt_buf), 0);
+  send(client->sockfd, mgmt_buf, sizeof(mgmt_buf), 0);
   send(client->sockfd, topic.prt, topic.len, 0);
 
-
+  // todo: server response
 }
 int mqClientJoin(mqClient *client, mqStr topic) {}
 int mqClientQuit(mqClient *client, mqStr topic) {}
 int mqClientSend(mqClient *client, mqStr topic, mqStr msg,
-                 uint64_t due_timestamp) {
-                  mqPacket pckt = {.body_tag = MQPACKET_MSG, .body_len = sizeof(mqMsg)};//body?
-                  mqMsg msg_data = {0};
-                  msg_data.due_timestamp = due_timestamp;
-                  msg_data.msg.prt = msg.prt;
-                  msg_data.msg.len = msg.len;
-                  msg_data.topic.prt = topic.prt;
-                  msg_data.topic.len = topic.len;
-                  msg_data.client.prt = client->client.prt;
-                  msg_data.client.len = client->client.len;
+                 uint32_t due_timestamp) {
+  mqMsgHdr msg_hdr = {
+      .due_timestamp = due_timestamp,
+      .topic_len = topic.len,
+      .client_len = client->name.len,
+      .msg_len = msg.len,
+  };
+  uint8_t msg_hdr_buf[MQMSG_SIZE] = {0};
+  mqMsgHdrInto(msg_hdr, msg_hdr_buf);
 
-                  send(client->sockfd, &pckt, sizeof(pckt), 0);
-                  send(client->sockfd, &msg_data, sizeof(msg_data), 0);
-                  send(client->sockfd, msg_data.msg.prt, msg_data.msg.len, 0);
-                  send(client->sockfd, msg_data.topic.prt, msg_data.topic.len, 0);
-                  send(client->sockfd, msg_data.client.prt, msg_data.client.len, 0);
-                 }
+  mqPacketHdr pckt = {.body_tag = MQPACKET_MSG,
+                      .body_len = sizeof(msg_hdr_buf) + topic.len +
+                                  client->name.len + msg.len};
+  uint8_t pckt_buf[MQPACKET_SIZE] = {0};
+  mqPacketHdrInto(pckt, pckt_buf);
+
+  // todo: handle failures
+  send(client->sockfd, pckt_buf, sizeof(pckt_buf), 0);
+  send(client->sockfd, msg_hdr_buf, sizeof(msg_hdr_buf), 0);
+  send(client->sockfd, topic.prt, topic.len, 0);
+  send(client->sockfd, client->name.prt, client->name.len, 0);
+  send(client->sockfd, msg.prt, msg.len, 0);
+
+  // todo: server response
+}
 int mqClientRecv(mqClient *client, mqMsg **msg) {}
 int mqClientRecvFree(mqClient *client, mqMsg **msg) {}

@@ -15,10 +15,10 @@ int mqClientCreate(mqClient *client, mqStr topic);
 int mqClientJoin(mqClient *client, mqStr topic);
 int mqClientQuit(mqClient *client, mqStr topic);
 int mqClientSend(mqClient *client, mqStr topic, mqStr msg,
-                 uint64_t due_timestamp);
+                 uint32_t due_timestamp);
 
 typedef struct {
-  uint64_t due_timestamp;
+  uint32_t due_timestamp;
   mqStr client;
   mqStr topic;
   mqStr msg;
