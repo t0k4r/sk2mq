@@ -25,6 +25,7 @@ struct mqClient {
   int sockfd;
   mqStr name;
 };
+mqStr mqCStr(char *cstr) { return (mqStr){.prt = cstr, .len = strlen(cstr)}; }
 
 int mqClientInit(mqClient **client, char *addr, char *port) {
   mqClient *new_client = malloc(sizeof(mqClient));
@@ -64,7 +65,7 @@ int mqClientInit(mqClient **client, char *addr, char *port) {
   if (ret == -1)
     return errno;
 
-  printf("got name: %.*s", (int)new_client->name.len, new_client->name.prt);
+  printf("got name: %.*s\n", (int)new_client->name.len, new_client->name.prt);
   *client = new_client;
   return 0;
 }

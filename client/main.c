@@ -7,8 +7,8 @@ int main(int argc, char **argv) {
 
   mqClient *client = NULL;
   mqClientInit(&client, addr, port);
-  // mqClientCreate(client, (mqStr){.len = 5, .prt = "topic"});
-  // mqClientCreate(client, (mqStr){.len = 6, .prt = "topic3"});
-  mqClientSend(client, (mqStr){.len = 6, .prt = "topic3"},
-               (mqStr){.len = 12, .prt = "Hello World!"}, 10);
+  mqClientCreate(client, mqCStr("topic3"));
+  mqClientSend(client, mqCStr("topic3"), mqCStr("Hello, world"), 1798717378);
+  for (;;) {
+  }
 }

@@ -7,6 +7,7 @@ typedef struct {
   size_t len;
   char *prt;
 } mqStr;
+mqStr mqCStr(char *cstr);
 
 typedef struct mqClient mqClient;
 int mqClientInit(mqClient **client, char *addr, char *port);

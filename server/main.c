@@ -11,6 +11,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -19,13 +20,24 @@
 #define STRINGIFY2(X) #X
 #define logPrintf(...) printf(__FILE__ ":" STRINGIFY1(__LINE__) " " __VA_ARGS__)
 
+int recvall(int fd, void *buf, size_t n) {
+  size_t total = 0;
+  do {
+    ssize_t ret = recv(fd, buf + total, n - total, 0);
+    if (ret == -1)
+      return -1;
+    total += ret;
+  } while (total != n);
+  return total;
+}
+
 typedef struct {
   size_t len;
   char *ptr;
 } Str;
 bool StrEqual(Str a, Str b) {
   if (a.len == b.len) {
-    return memcmp(a.ptr, b.ptr, b.len);
+    return memcmp(a.ptr, b.ptr, b.len) == 0;
   }
   return false;
 }
@@ -56,6 +68,22 @@ typedef struct {
   Str client;
   Str msg;
 } Msg;
+Msg *MsgParse(uint8_t *bytes) {
+  mqMsgHdr hdr = mqMsgHdrFrom(bytes);
+  Msg *msg = malloc(sizeof(*msg));
+  char *topic_ptr = (char *)bytes + MQMSG_SIZE;
+  char *client_ptr = topic_ptr + hdr.topic_len;
+  char *msg_ptr = client_ptr + hdr.client_len;
+  *msg = (Msg){
+      .raw = bytes,
+      .hdr = hdr,
+      .topic = (Str){.ptr = topic_ptr, .len = hdr.topic_len},
+      .client = (Str){.ptr = client_ptr, .len = hdr.client_len},
+      .msg = (Str){.ptr = msg_ptr, .len = hdr.msg_len},
+  };
+  return msg;
+}
+
 void MsgDeinit(Msg **msg) {
   free((*msg)->raw);
   free(*msg);
@@ -82,25 +110,6 @@ MsgNode *MsgNodeInsert(MsgNode *root, Msg *msg) {
   // insert node into linked list
   return root;
 }
-// typedef struct {
-//   mqMsg *msg;
-//   size_t count;
-//   size_t capacity;
-// } mqmsgNode;
-
-// void mqMsgNodeInit(mqmsgNode *mnn) {
-//   mnn->msg = NULL;
-//   mnn->count = 0;
-//   mnn->capacity = 0;
-// }
-
-// void mqMsgNodeAdd(mqmsgNode *mnn, mqMsg msg) {
-//   if (mnn->count == mnn->capacity) {
-//     mnn->capacity = mnn->capacity == 0 ? 4 : mnn->capacity * 2;
-//     mnn->msg = realloc(mnn->msg, mnn->capacity * sizeof(mqMsg));
-//   }
-//   mnn->msg[mnn->count++] = msg;
-// }
 
 typedef struct {
   Str name;
@@ -115,14 +124,6 @@ typedef struct {
   size_t count;
   size_t capacity;
 } TopicList;
-
-// TopicList topicList;
-
-// void TopicListInit(TopicList *tl) {
-//   tl->topics = NULL;
-//   tl->count = 0;
-//   tl->capacity = 0;
-// }
 
 // send all messages to conn
 int TopicBacklog(Topic *topic, Conn *conn) {
@@ -152,6 +153,7 @@ void TopicQuit(Topic *topic, Conn *conn) {
     if (topic->connections[i]->fd == conn->fd) {
       memmove(&topic->connections[i], &topic->connections[i + 1],
               (topic->connections_len - i - 1) * sizeof(*topic->connections));
+      topic->connections_len--;
       break;
     }
   }
@@ -214,6 +216,11 @@ int ServerInit(Server *srv, char *addr, uint16_t port) {
   srv->sockfd = socket(PF_INET, SOCK_STREAM, 0);
   if (srv->sockfd == -1)
     return errno;
+
+  // handle error;
+  int enable = 1;
+  setsockopt(srv->sockfd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
+
   struct sockaddr_in addr_in = (struct sockaddr_in){
       .sin_family = AF_INET,
       .sin_addr.s_addr = inet_addr(addr),
@@ -252,10 +259,10 @@ int ServerAcceptConn(Server *srv) {
   return 0;
 }
 
-int ServerHandleMgmt(Server *srv, Conn *conn, uint32_t len) {
+int ServerHandleMgmt(Server *srv, Conn *conn) {
   uint8_t mgmt_buf[MQMGMT_SIZE] = {0};
   // todo: handle errors
-  int ret = recv(conn->fd, mgmt_buf, sizeof(mgmt_buf), 0);
+  int ret = recvall(conn->fd, mgmt_buf, sizeof(mgmt_buf));
   assert(ret != -1);
   mqMgmtHdr mgmt = mqMgmtHdrFrom(mgmt_buf);
   Str topic = StrInit(mgmt.topic_len);
@@ -265,6 +272,8 @@ int ServerHandleMgmt(Server *srv, Conn *conn, uint32_t len) {
     int idx = TopicListFind(&srv->topics, topic);
     if (idx == -1) {
       TopicListAdd(&srv->topics, topic);
+      logPrintf("==MGMT==\n %.*s created %.*s\n", (int)conn->client.len,
+                conn->client.ptr, (int)topic.len, topic.ptr);
       // tood: send ok
     } else {
       // todo: error już istnieje
@@ -272,9 +281,11 @@ int ServerHandleMgmt(Server *srv, Conn *conn, uint32_t len) {
   } break;
   case MQACTION_JOIN: {
     int idx = TopicListFind(&srv->topics, topic);
-    Topic *topic = &srv->topics.topics[idx];
     if (idx != -1) {
+      Topic *topic = &srv->topics.topics[idx];
       TopicJoin(topic, conn);
+      logPrintf("==MGMT==\n %.*s joined %.*s\n", (int)conn->client.len,
+                conn->client.ptr, (int)topic->name.len, topic->name.ptr);
       // todo: send resp joinded
 
       // todo: handle error
@@ -287,80 +298,44 @@ int ServerHandleMgmt(Server *srv, Conn *conn, uint32_t len) {
   case MQACTION_QUIT: {
     int idx = TopicListFind(&srv->topics, topic);
     if (idx != -1) {
+      Topic *topic = &srv->topics.topics[idx];
       TopicQuit(&srv->topics.topics[idx], conn);
+      logPrintf("==MGMT==\n %.*s quit %.*s\n", (int)conn->client.len,
+                conn->client.ptr, (int)topic->name.len, topic->name.ptr);
     }
   } break;
   }
-
-  // printf("Management packet received\n");
-
-  // mqmgmt_t topp = {0};
-  // recv(conn->fd, &topp, sizeof(topp), 0);
-  // printf("Action: %d\n", topp.action);
-
-  // recv(conn->fd, topp.topic, topp.topic_len, 0);
-  // printf("Topic: %.*s\n", topp.topic_len, topp.topic);
-
-  // // dodanie tematu
-  // addTopic(&topicList, topp.topic);
-
-  // mqMsg testm = {0};
-
-  // testm.msg.prt = "Test message";        // msg test
-  // testm.msg.len = strlen(testm.msg.prt); // msg test
-  // mqMsgNodeAdd(&topicList.topics[topicList.count - 1].messages,
-  //              testm); // msg test
-
-  // for (size_t i = 0; i < topicList.count;
-  //      i++) { // display All topics and messages
-  //   printf("Stored topic %zu: %s\n", i, topicList.topics[i].name);
-  //   printf("With %zu messages\n", topicList.topics[i].messages.count);
-  //   for (size_t j = 0; j < topicList.topics[i].messages.count; j++) {
-  //     printf(" Message %s\n", topicList.topics[i].messages.msg[j].msg.prt);
-  //   }
-  // }
+  return 0;
 }
 
 int ServerHandleMsg(Server *srv, Conn *conn, uint32_t len) {
-  // printf("Message packet received\n");
-  // mqMsg packetmsg = {0};
-  // recv(conn->fd, &packetmsg, sizeof(packetmsg), 0);
-  // packetmsg.msg.prt = malloc(packetmsg.msg.len);
-  // packetmsg.client.prt = malloc(packetmsg.client.len);
-  // packetmsg.topic.prt = malloc(packetmsg.topic.len);
+  uint8_t *raw = malloc(len);
+  // todo henlde error
+  int ret = recvall(conn->fd, raw, len);
+  assert(ret != -1);
+  Msg *msg = MsgParse(raw);
+  assert(msg != NULL);
+  logPrintf("==MSG==\nclient: %.*s\ntopic: %.*s\nmessage: %.*s\n",
+            (int)msg->client.len, msg->client.ptr, (int)msg->topic.len,
+            msg->topic.ptr, (int)msg->msg.len, msg->msg.ptr);
+  int idx = TopicListFind(&srv->topics, msg->topic);
+  if (idx == -1) {
+    logPrintf("topic does not exist\n");
+    // todo: return invalidd topic
+    MsgDeinit(&msg);
+    return 0;
+  }
+  if (!StrEqual(conn->client, msg->client)) {
+    logPrintf("invalid client\n");
+    // todo: return bad client;
+    MsgDeinit(&msg);
+    return 0;
+  }
 
-  // recv(conn->fd, packetmsg.msg.prt, packetmsg.msg.len, 0);
-  // recv(conn->fd, packetmsg.topic.prt, packetmsg.topic.len, 0);
-  // recv(conn->fd, packetmsg.client.prt, packetmsg.client.len, 0);
-
-  // printf("Message due at %lu\n", packetmsg.due_timestamp);
-  // printf("Message size: %ld\n", packetmsg.msg.len);
-  // printf("Message content: %.*s\n", (int)packetmsg.msg.len,
-  // packetmsg.msg.prt); printf("client size: %ld\n", packetmsg.client.len);
-  // printf("Message received from client %.*s\n", (int)packetmsg.client.len,
-  //        packetmsg.client.prt);
-  // printf("topic size: %ld\n", packetmsg.topic.len);
-  // printf("On topic %.*s\n", (int)packetmsg.topic.len, packetmsg.topic.prt);
-
-  // int topic_index = findTopic(&topicList, packetmsg.topic.prt);
-  // printf("Topic index: %d\n", topic_index);
-
-  // if (topic_index < 0) {
-  //   printf("Topic not found\n");
-  //   close(conn->fd); // testowe
-  //   return -1;       // testowe dopoki nie naprawimy epoll
-  // }
-
-  // mqMsgNodeAdd(&topicList.topics[topic_index].messages, packetmsg);
-
-  // for (size_t i = 0; i < topicList.count;
-  //      i++) { // display All topics and messages
-  //   printf("Stored topic %zu: %s\n", i, topicList.topics[i].name);
-  //   printf("With %zu messages\n", topicList.topics[i].messages.count);
-  //   for (size_t j = 0; j < topicList.topics[i].messages.count; j++) {
-  //     printf(" Message %s\n", topicList.topics[i].messages.msg[j].msg.prt);
-  //   }
-  // }
+  Topic *topic = &srv->topics.topics[idx];
+  ret = TopicSend(topic, msg);
+  // todo hanlde erorrs and messages from past;
+  return 0;
 }
 
 int ServerHandleRequest(Server *srv, Conn *conn) {
@@ -370,6 +345,7 @@ int ServerHandleRequest(Server *srv, Conn *conn) {
   assert(ret != -1);
 
   mqPacketHdr pckt = mqPacketHdrFrom(pckt_buf);
+  logPrintf("==PCKT== tag:%d len:%u\n", pckt.body_tag, pckt.body_len);
   switch (pckt.body_tag) {
   case MQPACKET_MSG: {
     logPrintf("handle msg\n");
@@ -377,15 +353,17 @@ int ServerHandleRequest(Server *srv, Conn *conn) {
   } break;
   case MQPACKET_MGMT: {
     logPrintf("handle mgmt\n");
-    ServerHandleMgmt(srv, conn, pckt.body_len);
+    ServerHandleMgmt(srv, conn);
   } break;
   }
+  return 0;
 }
 
 int ServerRun(Server *srv) {
   srv->epollfd = epoll_create1(0);
   if (srv->epollfd == -1)
     return errno;
+
   int ret = listen(srv->sockfd, 0);
   if (ret == -1)
     return errno;
@@ -402,7 +380,6 @@ int ServerRun(Server *srv) {
   if (ret == -1)
     return errno;
   for (;;) {
-    debug();
     int count = epoll_wait(srv->epollfd, ee, 4, -1);
     for (int i = 0; i < count; i++) {
       Conn *ev_conn = ee[i].data.ptr;
