@@ -11,7 +11,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
-
+#include <time.h>
 #include <unistd.h>
 
 #define debug() printf("%s:%d\n", __FILE__, __LINE__)
@@ -38,7 +38,7 @@ Str StrInit(size_t len) {
   Str s = {.ptr = malloc(len), .len = len};
   return s;
 }
-Str StrDeinit(Str *s) {
+void StrDeinit(Str *s) {
   free(s->ptr);
   s->ptr = NULL;
 }
@@ -56,22 +56,32 @@ typedef struct {
   Str client;
   Str msg;
 } Msg;
+void MsgDeinit(Msg **msg) {
+  free((*msg)->raw);
+  free(*msg);
+  msg = NULL;
+}
+
+int MsgSend(Conn *conn, Msg *msg) {}
 
 typedef struct MsgNode MsgNode;
-struct mqMsgNode {
+struct MsgNode {
   Msg *msg;
   MsgNode *next;
 };
+// return pointer to next
+MsgNode *MsgNodeDeinit(MsgNode **node) {
+  MsgNode *next = (*node)->next;
+  MsgDeinit(&(*node)->msg);
+  free(*node);
+  node = NULL;
+  return next;
+}
 
 MsgNode *MsgNodeInsert(MsgNode *root, Msg *msg) {
   // insert node into linked list
   return root;
 }
-MsgNode *MsgNodeCleanup(MsgNode *root) {
-  // remove all nodes past due_timestamp
-  return root;
-}
-
 // typedef struct {
 //   mqMsg *msg;
 //   size_t count;
@@ -95,7 +105,9 @@ MsgNode *MsgNodeCleanup(MsgNode *root) {
 typedef struct {
   Str name;
   MsgNode *messages;
-  Conn *connections;
+  size_t connections_cap;
+  size_t connections_len;
+  Conn **connections;
 } Topic;
 
 typedef struct {
@@ -111,6 +123,63 @@ typedef struct {
 //   tl->count = 0;
 //   tl->capacity = 0;
 // }
+
+// send all messages to conn
+int TopicBacklog(Topic *topic, Conn *conn) {
+  time_t timestamp = time(NULL);
+
+  for (MsgNode *mn = topic->messages; mn != NULL; mn = mn->next) {
+    if ((uint32_t)timestamp > mn->msg->hdr.due_timestamp) {
+      // todo: error handle
+      int ret = MsgSend(conn, mn->msg);
+      assert(ret != -1);
+    }
+  }
+}
+
+void TopicJoin(Topic *topic, Conn *conn) {
+  if (topic->connections_len >= topic->connections_cap) {
+    topic->connections_cap =
+        topic->connections_cap == 0 ? 4 : topic->connections_cap * 2;
+    topic->connections =
+        realloc(topic->connections,
+                topic->connections_cap * sizeof(*topic->connections));
+  }
+  topic->connections[topic->connections_len++] = conn;
+}
+void TopicQuit(Topic *topic, Conn *conn) {
+  for (size_t i = 0; i < topic->connections_len; i++) {
+    if (topic->connections[i]->fd == conn->fd) {
+      memmove(&topic->connections[i], &topic->connections[i + 1],
+              (topic->connections_len - i - 1) * sizeof(*topic->connections));
+      break;
+    }
+  }
+}
+// send/add message to topic
+int TopicSend(Topic *topic, Msg *msg) {
+  time_t timestamp = time(NULL);
+  if ((uint32_t)timestamp > msg->hdr.due_timestamp) {
+    topic->messages = MsgNodeInsert(topic->messages, msg);
+    for (size_t i = 0; i < topic->connections_len; i++) {
+      Conn *conn = topic->connections[i];
+      if (StrEqual(conn->client, msg->client))
+        continue;
+      // todo: handle error
+      int ret = MsgSend(conn, msg);
+      assert(ret != -1);
+    }
+  }
+}
+// remove meassages past due date;
+void TopicCleanup(Topic *topic) {
+  time_t timestamp = time(NULL);
+  for (MsgNode *root = topic->messages; root != NULL; root = root->next) {
+    if ((uint32_t)timestamp > root->msg->hdr.due_timestamp)
+      break;
+    topic->messages = MsgNodeDeinit(&root);
+  }
+}
 
 void TopicListAdd(TopicList *tl, Str name) {
   if (tl->count == tl->capacity) {
@@ -129,8 +198,11 @@ int TopicListFind(TopicList *tl, Str topic) {
   return -1;
 }
 
-void TopicJoin(Topic *topic, Conn *conn) {}
-void TopicQuit(Topic *topic, Conn *conn) {}
+void TopicListCleanup(TopicList *tl) {
+  for (size_t i = 0; i < tl->count; i++) {
+    TopicCleanup(&tl->topics[i]);
+  }
+}
 
 typedef struct {
   int sockfd;
@@ -193,14 +265,21 @@ int ServerHandleMgmt(Server *srv, Conn *conn, uint32_t len) {
     int idx = TopicListFind(&srv->topics, topic);
     if (idx == -1) {
       TopicListAdd(&srv->topics, topic);
+      // tood: send ok
     } else {
       // todo: error już istnieje
     }
   } break;
   case MQACTION_JOIN: {
     int idx = TopicListFind(&srv->topics, topic);
+    Topic *topic = &srv->topics.topics[idx];
     if (idx != -1) {
-      TopicJoin(&srv->topics.topics[idx], conn);
+      TopicJoin(topic, conn);
+      // todo: send resp joinded
+
+      // todo: handle error
+      int ret = TopicBacklog(topic, conn);
+      assert(ret != 0);
     } else {
       // todo: error nie istnieje
     }
@@ -341,6 +420,8 @@ int ServerRun(Server *srv) {
         // todo: handle connection end
       }
     }
+    // remove messages past due date
+    TopicListCleanup(&srv->topics);
   }
 }
 
@@ -350,8 +431,6 @@ int main(int argc, char **argv) {
   Server srv = {0};
   int err = 0;
   debug();
-
-  // TopicListInit(&topicList);
 
   if ((err = ServerInit(&srv, addr, port))) {
     perror("ServerInit");
