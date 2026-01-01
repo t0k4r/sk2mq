@@ -20,10 +20,29 @@
 #define STRINGIFY2(X) #X
 #define logPrintf(...) printf(__FILE__ ":" STRINGIFY1(__LINE__) " " __VA_ARGS__)
 
-int recvall(int fd, void *buf, size_t n) {
+void *zeroMalloc(size_t size) {
+  void *ptr = malloc(size);
+  if (ptr == NULL)
+    assert(!"allocation failed dying");
+  memset(ptr, 0, size);
+  return ptr;
+}
+
+// int recvAll(int fd, void *buf, size_t n) {
+//   size_t total = 0;
+//   do {
+//     ssize_t ret = recv(fd, buf + total, n - total, 0);
+//     if (ret == -1)
+//       return -1;
+//     total += ret;
+//   } while (total != n);
+//   return total;
+// }
+
+ssize_t sendAll(int fd, void *buf, size_t n) {
   size_t total = 0;
   do {
-    ssize_t ret = recv(fd, buf + total, n - total, 0);
+    ssize_t ret = send(fd, buf + total, n - total, 0);
     if (ret == -1)
       return -1;
     total += ret;
@@ -42,23 +61,55 @@ bool StrEqual(Str a, Str b) {
   return false;
 }
 Str StrClone(Str s) {
-  void *ptr = malloc(s.len);
+  void *ptr = zeroMalloc(s.len);
   memcpy(ptr, s.ptr, s.len);
   return (Str){.ptr = ptr, .len = s.len};
 }
+Str StrClientname(int fd) {
+  int name_len = snprintf(NULL, 0, "user-%d", fd);
+  Str client_name = (Str){.len = name_len, .ptr = zeroMalloc(name_len + 1)};
+  sprintf(client_name.ptr, "user-%d", fd);
+  return client_name;
+}
 Str StrInit(size_t len) {
-  Str s = {.ptr = malloc(len), .len = len};
+  Str s = {.ptr = zeroMalloc(len), .len = len};
   return s;
 }
 void StrDeinit(Str *s) {
   free(s->ptr);
   s->ptr = NULL;
 }
+typedef enum {
+  CLIENT_WAITING,
+  CLIENT_READING_PROTO,
+  CLIENT_READING_MSG,
+  CLIENT_READING_MGMT,
+  CLIENT_DISCONECTED,
+} ConnClientState;
+
+typedef struct {
+  ConnClientState state;
+  int fd;
+  Str name;
+  void *data;
+  size_t data_red;
+  size_t data_total;
+} ConnClient;
+
+void ConnClientNextState(ConnClient *conn, ConnClientState state,
+                         size_t data_total) {
+  conn->state = state;
+  conn->data = zeroMalloc(data_total);
+  conn->data_red = 0;
+  conn->data_total = data_total;
+}
 
 typedef struct {
   enum { CONN_LISTENER, CONN_CLIENT } tag;
-  int fd;
-  Str client;
+  union {
+    int listener_fd;
+    ConnClient client;
+  };
 } Conn;
 
 typedef struct {
@@ -68,9 +119,11 @@ typedef struct {
   Str client;
   Str msg;
 } Msg;
+
 Msg *MsgParse(uint8_t *bytes) {
+  Msg *msg = zeroMalloc(sizeof(*msg));
   mqMsgHdr hdr = mqMsgHdrFrom(bytes);
-  Msg *msg = malloc(sizeof(*msg));
+  logPrintf("%u %u %u\n", hdr.client_len, hdr.topic_len, hdr.msg_len);
   char *topic_ptr = (char *)bytes + MQMSG_SIZE;
   char *client_ptr = topic_ptr + hdr.topic_len;
   char *msg_ptr = client_ptr + hdr.client_len;
@@ -90,7 +143,43 @@ void MsgDeinit(Msg **msg) {
   msg = NULL;
 }
 
-int MsgSend(Conn *conn, Msg *msg) {}
+typedef struct {
+  void *raw;
+  mqMgmtHdr hdr;
+  Str topic;
+} Mgmt;
+
+Mgmt *MgmtParse(uint8_t *bytes) {
+  Mgmt *mgmt = zeroMalloc(sizeof(*mgmt));
+  mqMgmtHdr hdr = mqMgmtHdrFrom(bytes);
+  char *topic_ptr = (char *)bytes + MQMGMT_SIZE;
+  *mgmt = (Mgmt){
+      .raw = bytes,
+      .hdr = hdr,
+      .topic = (Str){.ptr = topic_ptr, .len = hdr.topic_len},
+  };
+  return mgmt;
+}
+
+void MgmtDeinit(Mgmt **mgmt) {
+  free((*mgmt)->raw);
+  free(*mgmt);
+  mgmt = NULL;
+}
+
+int MsgSend(ConnClient *client, Msg *msg) {
+  uint8_t msg_hdr_buf[MQMSG_SIZE] = {0};
+  mqMsgHdrInto(msg->hdr, msg_hdr_buf);
+  // todo: error handling
+  int ret = send(client->fd, msg_hdr_buf, sizeof(msg_hdr_buf), 0);
+  assert(ret != -1);
+  ret = send(client->fd, msg->topic.ptr, msg->topic.len, 0);
+  assert(ret != -1);
+  ret = send(client->fd, msg->client.ptr, msg->client.len, 0);
+  assert(ret != -1);
+  ret = send(client->fd, msg->msg.ptr, msg->msg.len, 0);
+  assert(ret != -1);
+}
 
 typedef struct MsgNode MsgNode;
 struct MsgNode {
@@ -107,8 +196,18 @@ MsgNode *MsgNodeDeinit(MsgNode **node) {
 }
 
 MsgNode *MsgNodeInsert(MsgNode *root, Msg *msg) {
-  // insert node into linked list
-  return root;
+  if (root == NULL) {
+    MsgNode *new_node = zeroMalloc(sizeof(*new_node));
+    new_node->msg = msg;
+    return new_node;
+  } else if (root->msg->hdr.due_timestamp < msg->hdr.due_timestamp) {
+    root->next = MsgNodeInsert(root->next, msg);
+    return root;
+  } else {
+    MsgNode *new_node = zeroMalloc(sizeof(*new_node));
+    *new_node = (MsgNode){.msg = msg, .next = root};
+    return new_node;
+  }
 }
 
 typedef struct {
@@ -126,13 +225,13 @@ typedef struct {
 } TopicList;
 
 // send all messages to conn
-int TopicBacklog(Topic *topic, Conn *conn) {
+int TopicBacklog(Topic *topic, ConnClient *client) {
   time_t timestamp = time(NULL);
 
   for (MsgNode *mn = topic->messages; mn != NULL; mn = mn->next) {
     if ((uint32_t)timestamp > mn->msg->hdr.due_timestamp) {
       // todo: error handle
-      int ret = MsgSend(conn, mn->msg);
+      int ret = MsgSend(client, mn->msg);
       assert(ret != -1);
     }
   }
@@ -150,7 +249,7 @@ void TopicJoin(Topic *topic, Conn *conn) {
 }
 void TopicQuit(Topic *topic, Conn *conn) {
   for (size_t i = 0; i < topic->connections_len; i++) {
-    if (topic->connections[i]->fd == conn->fd) {
+    if (topic->connections[i]->client.fd == conn->client.fd) {
       memmove(&topic->connections[i], &topic->connections[i + 1],
               (topic->connections_len - i - 1) * sizeof(*topic->connections));
       topic->connections_len--;
@@ -165,13 +264,14 @@ int TopicSend(Topic *topic, Msg *msg) {
     topic->messages = MsgNodeInsert(topic->messages, msg);
     for (size_t i = 0; i < topic->connections_len; i++) {
       Conn *conn = topic->connections[i];
-      if (StrEqual(conn->client, msg->client))
+      if (StrEqual(conn->client.name, msg->client))
         continue;
       // todo: handle error
-      int ret = MsgSend(conn, msg);
+      int ret = MsgSend(&conn->client, msg);
       assert(ret != -1);
     }
   }
+  return 0;
 }
 // remove meassages past due date;
 void TopicCleanup(Topic *topic) {
@@ -237,84 +337,109 @@ int ServerAcceptConn(Server *srv) {
   int sockfd = accept(srv->sockfd, NULL, 0);
   if (sockfd == -1)
     return errno;
-  Conn *client_conn = malloc(sizeof(*client_conn));
-  *client_conn = (Conn){.fd = sockfd, .tag = CONN_CLIENT};
-  struct epoll_event ee = {.events = EPOLLIN, .data.ptr = client_conn};
+  Str client_name = StrClientname(sockfd);
+  Conn *conn = zeroMalloc(sizeof(*conn));
+  *conn = (Conn){.tag = CONN_CLIENT,
+                 .client = {.fd = sockfd,
+                            // todo: bettern namegen
+                            .name = client_name}};
+  struct epoll_event ee = {.events = EPOLLIN, .data.ptr = conn};
   int ret = epoll_ctl(srv->epollfd, EPOLL_CTL_ADD, sockfd, &ee);
   if (ret == -1)
     return errno;
-
-  // todo: error check and beter namegen
-  int name_len = snprintf(NULL, 0, "user-%d", sockfd);
-  Str client_name = (Str){.len = name_len, .ptr = malloc(name_len + 1)};
-  sprintf(client_name.ptr, "user-%d", sockfd);
-  client_conn->client = client_name;
 
   mqPacketHdr pckt = {.body_tag = MQPACKET_HELLO, .body_len = client_name.len};
   uint8_t pckt_buf[MQPACKET_SIZE] = {0};
   mqPacketHdrInto(pckt, pckt_buf);
   // todo: hanlde errors
-  send(sockfd, pckt_buf, sizeof(pckt_buf), 0);
-  send(sockfd, client_name.ptr, client_name.len, 0);
+  ret = send(sockfd, pckt_buf, sizeof(pckt_buf), 0);
+  assert(ret != -1);
+  ret = send(sockfd, client_name.ptr, client_name.len, 0);
+  assert(ret != -1);
   return 0;
 }
 
 int ServerHandleMgmt(Server *srv, Conn *conn) {
-  uint8_t mgmt_buf[MQMGMT_SIZE] = {0};
-  // todo: handle errors
-  int ret = recvall(conn->fd, mgmt_buf, sizeof(mgmt_buf));
-  assert(ret != -1);
-  mqMgmtHdr mgmt = mqMgmtHdrFrom(mgmt_buf);
-  Str topic = StrInit(mgmt.topic_len);
-  recv(conn->fd, topic.ptr, topic.len, 0);
-  switch (mgmt.action) {
+  ConnClient *client = &conn->client;
+  assert(client->state == CLIENT_READING_MGMT);
+
+  ssize_t red = recv(client->fd, client->data,
+                     client->data_total - client->data_red, MSG_DONTWAIT);
+  if (red == -1 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+    return 0;
+  } else if (red == -1) {
+    assert(!"todo: handle failed read");
+  }
+  client->data_red += red;
+
+  if (client->data_red != client->data_total)
+    return 0;
+
+  Mgmt *mgmt = MgmtParse(client->data);
+  switch (mgmt->hdr.action) {
   case MQACTION_CREATE: {
-    int idx = TopicListFind(&srv->topics, topic);
+    int idx = TopicListFind(&srv->topics, mgmt->topic);
     if (idx == -1) {
-      TopicListAdd(&srv->topics, topic);
-      logPrintf("==MGMT==\n %.*s created %.*s\n", (int)conn->client.len,
-                conn->client.ptr, (int)topic.len, topic.ptr);
+      TopicListAdd(&srv->topics, StrClone(mgmt->topic));
+      logPrintf("==MGMT==\n %.*s created %.*s\n", (int)client->name.len,
+                client->name.ptr, (int)mgmt->topic.len, mgmt->topic.ptr);
       // tood: send ok
     } else {
       // todo: error już istnieje
     }
   } break;
   case MQACTION_JOIN: {
-    int idx = TopicListFind(&srv->topics, topic);
+    int idx = TopicListFind(&srv->topics, mgmt->topic);
     if (idx != -1) {
       Topic *topic = &srv->topics.topics[idx];
       TopicJoin(topic, conn);
-      logPrintf("==MGMT==\n %.*s joined %.*s\n", (int)conn->client.len,
-                conn->client.ptr, (int)topic->name.len, topic->name.ptr);
+      logPrintf("==MGMT==\n %.*s joined %.*s\n", (int)client->name.len,
+                client->name.ptr, (int)topic->name.len, topic->name.ptr);
       // todo: send resp joinded
 
       // todo: handle error
-      int ret = TopicBacklog(topic, conn);
+      int ret = TopicBacklog(topic, client);
       assert(ret != 0);
     } else {
       // todo: error nie istnieje
     }
   } break;
   case MQACTION_QUIT: {
-    int idx = TopicListFind(&srv->topics, topic);
+    int idx = TopicListFind(&srv->topics, mgmt->topic);
     if (idx != -1) {
       Topic *topic = &srv->topics.topics[idx];
       TopicQuit(&srv->topics.topics[idx], conn);
-      logPrintf("==MGMT==\n %.*s quit %.*s\n", (int)conn->client.len,
-                conn->client.ptr, (int)topic->name.len, topic->name.ptr);
+      logPrintf("==MGMT==\n %.*s quit %.*s\n", (int)client->name.len,
+                client->name.ptr, (int)topic->name.len, topic->name.ptr);
     }
   } break;
   }
+  // TODO: handle it also in Error cases;
+  MgmtDeinit(&mgmt);
+  client->state = CLIENT_WAITING;
   return 0;
 }
 
-int ServerHandleMsg(Server *srv, Conn *conn, uint32_t len) {
-  uint8_t *raw = malloc(len);
-  // todo henlde error
-  int ret = recvall(conn->fd, raw, len);
-  assert(ret != -1);
-  Msg *msg = MsgParse(raw);
+int ServerHandleMsg(Server *srv, Conn *conn) {
+  ConnClient *client = &conn->client;
+  assert(client->state == CLIENT_READING_MSG);
+
+  ssize_t red = recv(client->fd, client->data,
+                     client->data_total - client->data_red, MSG_DONTWAIT);
+  if (red == -1 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+    return 0;
+  } else if (red == -1) {
+    assert(!"todo: handle failed read");
+  }
+  client->data_red += red;
+
+  if (client->data_red != client->data_total)
+    return 0;
+
+  conn->client.state = CLIENT_WAITING;
+  Msg *msg = MsgParse(client->data);
   assert(msg != NULL);
+  logPrintf("%lu %lu %lu\n", msg->client.len, msg->topic.len, msg->msg.len);
   logPrintf("==MSG==\nclient: %.*s\ntopic: %.*s\nmessage: %.*s\n",
             (int)msg->client.len, msg->client.ptr, (int)msg->topic.len,
             msg->topic.ptr, (int)msg->msg.len, msg->msg.ptr);
@@ -325,7 +450,7 @@ int ServerHandleMsg(Server *srv, Conn *conn, uint32_t len) {
     MsgDeinit(&msg);
     return 0;
   }
-  if (!StrEqual(conn->client, msg->client)) {
+  if (!StrEqual(conn->client.name, msg->client)) {
     logPrintf("invalid client\n");
     // todo: return bad client;
     MsgDeinit(&msg);
@@ -333,30 +458,60 @@ int ServerHandleMsg(Server *srv, Conn *conn, uint32_t len) {
   }
 
   Topic *topic = &srv->topics.topics[idx];
-  ret = TopicSend(topic, msg);
+  TopicSend(topic, msg);
   // todo hanlde erorrs and messages from past;
   return 0;
 }
 
-int ServerHandleRequest(Server *srv, Conn *conn) {
-  uint8_t pckt_buf[MQPACKET_SIZE] = {0};
-  // todo: handle error;
-  int ret = recv(conn->fd, &pckt_buf, sizeof(pckt_buf), 0);
-  assert(ret != -1);
+int ServerHandleProto(Server *srv, Conn *conn) {
+  ConnClient *client = &conn->client;
+  assert(client->state == CLIENT_READING_PROTO);
+  ssize_t red = recv(client->fd, client->data,
+                     client->data_total - client->data_red, MSG_DONTWAIT);
+  if (red == -1 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+    return 0;
+  } else if (red == -1) {
+    assert(!"todo: handle failed read");
+  }
+  client->data_red += red;
+  if (client->data_red != client->data_total)
+    return 0;
 
-  mqPacketHdr pckt = mqPacketHdrFrom(pckt_buf);
-  logPrintf("==PCKT== tag:%d len:%u\n", pckt.body_tag, pckt.body_len);
+  mqPacketHdr pckt = mqPacketHdrFrom(client->data);
+  free(client->data);
   switch (pckt.body_tag) {
-  case MQPACKET_MSG: {
-    logPrintf("handle msg\n");
-    ServerHandleMsg(srv, conn, pckt.body_len);
-  } break;
   case MQPACKET_MGMT: {
+    ConnClientNextState(client, CLIENT_READING_MGMT, pckt.body_len);
+  } break;
+  case MQPACKET_MSG: {
+    ConnClientNextState(client, CLIENT_READING_MSG, pckt.body_len);
+  } break;
+  }
+}
+
+int ServerHandleRequest(Server *srv, Conn *conn) {
+  ConnClient *client = &conn->client;
+  switch (conn->client.state) {
+  case CLIENT_WAITING: {
+    ConnClientNextState(client, CLIENT_READING_PROTO, MQPACKET_SIZE);
+    return ServerHandleRequest(srv, conn);
+  } break;
+  case CLIENT_READING_PROTO: {
+    logPrintf("handle proto\n");
+    ServerHandleProto(srv, conn);
+  } break;
+  case CLIENT_READING_MSG: {
+    logPrintf("handle msg\n");
+    ServerHandleMsg(srv, conn);
+  } break;
+  case CLIENT_READING_MGMT: {
     logPrintf("handle mgmt\n");
     ServerHandleMgmt(srv, conn);
   } break;
-  }
-  return 0;
+  case CLIENT_DISCONECTED: {
+    assert(!"todo: handle disconnect");
+  } break;
+  };
 }
 
 int ServerRun(Server *srv) {
@@ -368,8 +523,8 @@ int ServerRun(Server *srv) {
   if (ret == -1)
     return errno;
 
-  Conn *listen_conn = malloc(sizeof(*listen_conn));
-  *listen_conn = (Conn){.fd = srv->sockfd, .tag = CONN_LISTENER};
+  Conn *listen_conn = zeroMalloc(sizeof(*listen_conn));
+  *listen_conn = (Conn){.tag = CONN_LISTENER, .listener_fd = srv->sockfd};
 
   struct epoll_event ee[4] = {0};
   ee[0] = (struct epoll_event){
