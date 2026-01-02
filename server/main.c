@@ -98,10 +98,27 @@ typedef struct {
 
 void ConnClientNextState(ConnClient *conn, ConnClientState state,
                          size_t data_total) {
+  logPrintf("next state: %d, size %lu\n", state, data_total);
   conn->state = state;
   conn->data = zeroMalloc(data_total);
   conn->data_red = 0;
   conn->data_total = data_total;
+}
+// 1: done reading, 2: call again, -1: error
+int ClientConnRead(ConnClient *client) {
+  ssize_t red = recv(client->fd, client->data + client->data_red,
+                     client->data_total - client->data_red, MSG_DONTWAIT);
+  if (red == -1 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+    return 0;
+  } else if (red == -1) {
+    return -1;
+    assert(!"todo: handle failed read");
+  }
+  client->data_red += red;
+
+  if (client->data_red != client->data_total)
+    return 0;
+  return 1;
 }
 
 typedef struct {
@@ -123,15 +140,15 @@ typedef struct {
 Msg *MsgParse(uint8_t *bytes) {
   Msg *msg = zeroMalloc(sizeof(*msg));
   mqMsgHdr hdr = mqMsgHdrFrom(bytes);
-  logPrintf("%u %u %u\n", hdr.client_len, hdr.topic_len, hdr.msg_len);
+  logPrintf("%u %u %u\n", hdr.topic_len, hdr.client_len, hdr.msg_len);
   char *topic_ptr = (char *)bytes + MQMSG_SIZE;
   char *client_ptr = topic_ptr + hdr.topic_len;
   char *msg_ptr = client_ptr + hdr.client_len;
   *msg = (Msg){
       .raw = bytes,
       .hdr = hdr,
-      .topic = (Str){.ptr = topic_ptr, .len = hdr.topic_len},
-      .client = (Str){.ptr = client_ptr, .len = hdr.client_len},
+      .topic = (Str){.ptr = topic_ptr, .len = 6},   // hdr.topic_len},
+      .client = (Str){.ptr = client_ptr, .len = 6}, // hdr.client_len},
       .msg = (Str){.ptr = msg_ptr, .len = hdr.msg_len},
   };
   return msg;
@@ -363,17 +380,13 @@ int ServerHandleMgmt(Server *srv, Conn *conn) {
   ConnClient *client = &conn->client;
   assert(client->state == CLIENT_READING_MGMT);
 
-  ssize_t red = recv(client->fd, client->data,
-                     client->data_total - client->data_red, MSG_DONTWAIT);
-  if (red == -1 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+  int ret = ClientConnRead(client);
+  assert(ret != -1);
+  if (ret == 0) {
     return 0;
-  } else if (red == -1) {
-    assert(!"todo: handle failed read");
   }
-  client->data_red += red;
 
-  if (client->data_red != client->data_total)
-    return 0;
+  logPrintf("%lu\n", client->data_red);
 
   Mgmt *mgmt = MgmtParse(client->data);
   switch (mgmt->hdr.action) {
@@ -424,17 +437,13 @@ int ServerHandleMsg(Server *srv, Conn *conn) {
   ConnClient *client = &conn->client;
   assert(client->state == CLIENT_READING_MSG);
 
-  ssize_t red = recv(client->fd, client->data,
-                     client->data_total - client->data_red, MSG_DONTWAIT);
-  if (red == -1 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+  int ret = ClientConnRead(client);
+  assert(ret != -1);
+  if (ret == 0) {
     return 0;
-  } else if (red == -1) {
-    assert(!"todo: handle failed read");
   }
-  client->data_red += red;
-
-  if (client->data_red != client->data_total)
-    return 0;
+  logPrintf("%lu\n%.*s\n", client->data_red, (int)client->data_red,
+            (char *)client->data);
 
   conn->client.state = CLIENT_WAITING;
   Msg *msg = MsgParse(client->data);
@@ -465,20 +474,16 @@ int ServerHandleMsg(Server *srv, Conn *conn) {
 
 int ServerHandleProto(Server *srv, Conn *conn) {
   ConnClient *client = &conn->client;
-  assert(client->state == CLIENT_READING_PROTO);
-  ssize_t red = recv(client->fd, client->data,
-                     client->data_total - client->data_red, MSG_DONTWAIT);
-  if (red == -1 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+  int ret = ClientConnRead(client);
+  assert(ret != -1);
+  if (ret == 0) {
     return 0;
-  } else if (red == -1) {
-    assert(!"todo: handle failed read");
   }
-  client->data_red += red;
-  if (client->data_red != client->data_total)
-    return 0;
-
+  logPrintf("%lu\n", client->data_red);
   mqPacketHdr pckt = mqPacketHdrFrom(client->data);
   free(client->data);
+  logPrintf("==PROTO==len: %u\n", pckt.body_len);
+
   switch (pckt.body_tag) {
   case MQPACKET_MGMT: {
     ConnClientNextState(client, CLIENT_READING_MGMT, pckt.body_len);
