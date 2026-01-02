@@ -109,7 +109,9 @@ int ConnClientRead(ConnClient *client) {
     return 0;
   } else if (red == -1) {
     return -1;
-    assert(!"todo: handle failed read");
+  } else if (red == 0) {
+    client->state = CLIENT_DISCONECTED;
+    return 0;
   }
   client->data_red += red;
 
@@ -126,17 +128,21 @@ typedef struct {
   };
 } Conn;
 
-void ConnDeinit(Conn *conn) {
+void ConnDeinit(int epoll_fd, Conn *conn) {
   switch (conn->tag) {
   case CONN_LISTENER: {
     close(conn->listener_fd);
   } break;
   case CONN_CLIENT: {
+    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->client.fd, NULL);
+    shutdown(conn->client.fd, SHUT_RDWR);
+    close(conn->client.fd);
     if (conn->client.data != NULL)
       free(conn->client.data);
     StrDeinit(&conn->client.name);
   } break;
   }
+
   free(conn);
 }
 
@@ -531,6 +537,8 @@ int ServerHandleProto(Server *srv, Conn *conn) {
   if (ret == 0) {
     return 0;
   } else if (ret == -1) {
+    client->state = CLIENT_DISCONECTED;
+    return -1;
     assert(!"todo: handle failed read");
   }
   mqPacketHdr pckt = mqPacketHdrFrom(client->data);
@@ -571,7 +579,7 @@ int ServerHandleRequest(Server *srv, Conn *conn) {
     logPrintf("%.*s disconected\n", (int)conn->client.name.len,
               conn->client.name.ptr);
     TopicListCleanupConnections(&srv->topics);
-    ConnDeinit(conn);
+    ConnDeinit(srv->epollfd, conn);
   } break;
   };
 
