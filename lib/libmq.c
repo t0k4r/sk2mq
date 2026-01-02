@@ -70,8 +70,7 @@ int mqClientInit(mqClient **client, char *addr, char *port) {
   };
 
   // todo: handle not full read
-  ret = recv(new_client->sockfd, new_client->name.prt,
-             sizeof(new_client->name.len), 0);
+  ret = recv(new_client->sockfd, new_client->name.prt, new_client->name.len, 0);
   if (ret == -1)
     return errno;
 
