@@ -1,4 +1,3 @@
-#include "../lib/libmq.c"
 #include "../lib/libmq.h"
 #include <stdio.h>
 

@@ -331,11 +331,9 @@ int TopicSend(Topic *topic, Msg *msg) {
 // remove meassages past due date;
 void TopicCleanup(Topic *topic) {
   time_t timestamp = time(NULL);
-  MsgNode *root = NULL;
   MsgNode *it = topic->messages;
   while (it != NULL) {
     if ((uint32_t)timestamp < it->msg->hdr.due_timestamp) {
-      root = it;
       break;
     }
     logPrintf("removed expired message in %.*s\n", (int)it->msg->topic.len,
