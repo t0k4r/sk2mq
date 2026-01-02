@@ -12,6 +12,7 @@
 #include <sys/socket.h>
 
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 typedef struct mqMsgNode mqMsgNode;
@@ -26,6 +27,10 @@ struct mqClient {
   mqStr name;
 };
 mqStr mqCStr(char *cstr) { return (mqStr){.prt = cstr, .len = strlen(cstr)}; }
+uint32_t mqTimeAfter(uint32_t seconds) {
+  time_t timestamp = time(NULL);
+  return timestamp + seconds;
+}
 
 int mqClientInit(mqClient **client, char *addr, char *port) {
   mqClient *new_client = malloc(sizeof(mqClient));
@@ -90,6 +95,8 @@ int mqClientCreate(mqClient *client, mqStr topic) {
   recv(client->sockfd, resp_buf, sizeof(resp_buf), 0);
   printf("resp: %s\n", resp_buf);
 }
+// ta funkcja ma tylko dołączać a nie odbiera dane ma toylko odebrać kod żę ok
+// odbieraniw wiadomości będzeie poprzez wywoływanie w pentli mqClientRecv
 int mqClientJoin(mqClient *client, mqStr topic) {
   mqMgmtHdr mgmt = {.action = MQACTION_JOIN, .topic_len = topic.len};
   uint8_t mgmt_buf[MQMGMT_SIZE] = {0};
@@ -105,26 +112,8 @@ int mqClientJoin(mqClient *client, mqStr topic) {
   send(client->sockfd, mgmt_buf, sizeof(mgmt_buf), 0);
   send(client->sockfd, topic.prt, topic.len, 0);
 
-  // todo: server response
-  for(;;){ // backlog - dane w petli i sygnal koncowy
-
-    /*uint8_t resp_buf[MQMSG_SIZE] = {0};
-    ssize_t red = recv(client->sockfd, resp_buf, sizeof(resp_buf), 0);
-    mqMsg *msg = {0};//MsgParse(resp_buf);
-    printf("backlog resp: %.*s client: %.*s msg: %.*s\n", (int)msg->topic.len,
-           msg->topic.prt, (int)msg->client.len, msg->client.prt,
-           (int)msg->msg.len, msg->msg.prt);
-
-    if(red == -1 && (errno == EWOULDBLOCK || errno == EAGAIN)){
-      continue;
-    } else if(red == -1){
-      return errno;
-    }*/
-    break;
-  }
-  char buf[14] = {0};
-  recv(client->sockfd, buf, 14, 0); // test END_OF_BACKLOG
-  printf("backlog end: %s\n", buf);
+  // todo: server response => w sensie MQPACKET_CODE_OK jeżeli inny to zwrócić
+  // error
 }
 int mqClientQuit(mqClient *client, mqStr topic) {}
 int mqClientSend(mqClient *client, mqStr topic, mqStr msg,
@@ -151,32 +140,10 @@ int mqClientSend(mqClient *client, mqStr topic, mqStr msg,
   send(client->sockfd, client->name.prt, client->name.len, 0);
   send(client->sockfd, msg.prt, msg.len, 0);
 
-  // todo: server response
-  uint8_t msg_hdr_buf2[MQMSG_SIZE] = {0};
-  recv(client->sockfd, msg_hdr_buf2, sizeof(msg_hdr_buf2), 0);
-  mqMsgHdr msg_hdr2 = mqMsgHdrFrom(msg_hdr_buf2);
-  char *topic_ptr = malloc(msg_hdr2.topic_len);
-  char *client_ptr = malloc(msg_hdr2.client_len);
-  char *msg_ptr = malloc(msg_hdr2.msg_len);
-  recv(client->sockfd, topic_ptr, msg_hdr2.topic_len, 0);
-  recv(client->sockfd, client_ptr, msg_hdr2.client_len, 0);
-  recv(client->sockfd, msg_ptr, msg_hdr2.msg_len, 0);
-
-  mqMsg msg2 = {
-      .due_timestamp = msg_hdr2.due_timestamp,
-      .topic = (mqStr){.prt = topic_ptr, .len = msg_hdr2.topic_len},
-      .client = (mqStr){.prt = client_ptr, .len = msg_hdr2.client_len},
-      .msg = (mqStr){.prt = msg_ptr, .len = msg_hdr2.msg_len},
-  };
-
-
-  printf("wyslano do kolejk i otrzymano z powrotem %.*s client: %.*s msg: %.*s\n", (int)msg2.topic.len,
-         msg2.topic.prt, (int)msg2.client.len, msg2.client.prt,
-         (int)msg2.msg.len, msg2.msg.prt);
+  // todo: server response => serwer nie powinien wysyłąć tego co dostał z tego
+  // samego klienta tylko MQPACKET_CODE_OK ;
 }
-int mqClientRecv(mqClient *client, mqMsg **msg) {
-  
-}
+
+mqStr mqClientName(mqClient *client) { return client->name; }
+int mqClientRecv(mqClient *client, mqMsg **msg) {}
 int mqClientRecvFree(mqClient *client, mqMsg **msg) {}
-
-

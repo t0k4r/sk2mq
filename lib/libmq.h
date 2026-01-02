@@ -8,6 +8,7 @@ typedef struct {
   char *prt;
 } mqStr;
 mqStr mqCStr(char *cstr);
+uint32_t mqTimeAfter(uint32_t seconds);
 
 typedef struct mqClient mqClient;
 int mqClientInit(mqClient **client, char *addr, char *port);
@@ -17,6 +18,7 @@ int mqClientJoin(mqClient *client, mqStr topic);
 int mqClientQuit(mqClient *client, mqStr topic);
 int mqClientSend(mqClient *client, mqStr topic, mqStr msg,
                  uint32_t due_timestamp);
+mqStr mqClientName(mqClient *client);
 
 typedef struct {
   uint32_t due_timestamp;

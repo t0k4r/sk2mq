@@ -5,10 +5,14 @@
 #include <stdint.h>
 #include <string.h>
 
-#define MQPACKET_MSG 0   // mqmsg_t
-#define MQPACKET_MGMT 1  // mqmgmt_t
-#define MQPACKET_RESP 2  // mqresp_t
-#define MQPACKET_HELLO 3 // mqhello_t
+#define MQPACKET_MSG 0
+#define MQPACKET_MGMT 1
+#define MQPACKET_HELLO 3
+#define MQPACKET_CODE_OK 20
+#define MQPACKET_CODE_BAD_CLEINT 41
+#define MQPACKET_CODE_TOPIC_EXISTS 32
+#define MQPACKET_CODE_TOPIC_NOT_EXISTS 44
+#define MQPACKET_CODE_SERVER_ERROR 50
 
 typedef struct {
   uint8_t body_tag;

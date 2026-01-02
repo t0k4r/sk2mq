@@ -13,11 +13,13 @@ int main(int argc, char **argv) {
   mqClient *client = NULL;
   mqClientInit(&client, addr, port);
   mqClientCreate(client, mqCStr("topic3"));
-  //mqClientSend(client, mqCStr("topic3"), mqCStr("Hello, world"), 1898717378);
-  mqClientJoin(client, mqCStr("topic3"));
-  //mqClientSend(client, mqCStr("topic3"), mqCStr("Hello, world 22"), 1898717378);
+  // mqClientSend(client, mqCStr("topic3"), mqCStr("Hello, world"), 1898717378);
+  //  mqClientJoin(client, mqCStr("topic3"));
+  // mqClientSend(client, mqCStr("topic3"), mqCStr("Hello, world 22"),
+  // 1898717378);
   mqClientSend(client, mqCStr("topic3"), mqCStr("Hello, world 44"), 1898717378);
-
+  mqClientSend(client, mqCStr("topic3"), mqCStr("Hello, world"),
+               mqTimeAfter(10)); // 1798717378);
   for (;;) {
     mqMsg *msg = NULL;
     // mqClientRecv(client, &msg);
