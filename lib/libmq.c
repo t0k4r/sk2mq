@@ -5,6 +5,7 @@
 #include <endian.h>
 #include <errno.h>
 #include <netdb.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +26,10 @@ struct mqMsgNode {
 struct mqClient {
   int sockfd;
   mqStr name;
+  pthread_mutex_t list_mtx;
+  pthread_mutex_t send_mtx;
+  // messages[];
+  // codes[];
 };
 mqStr mqCStr(char *cstr) { return (mqStr){.prt = cstr, .len = strlen(cstr)}; }
 uint32_t mqTimeAfter(uint32_t seconds) {
@@ -70,12 +75,16 @@ int mqClientInit(mqClient **client, char *addr, char *port) {
   if (ret == -1)
     return errno;
 
+  // strt mqClientRecwThread()
+
   printf("got name: %.*s\n", (int)new_client->name.len, new_client->name.prt);
   *client = new_client;
   return 0;
 }
 void mqClientDeinit(mqClient **client) {}
 int mqClientCreate(mqClient *client, mqStr topic) {
+  pthread_mutex_lock(&client->send_mtx);
+
   mqMgmtHdr mgmt = {.action = MQACTION_CREATE, .topic_len = topic.len};
   uint8_t mgmt_buf[MQMGMT_SIZE] = {0};
   mqMgmtHdrInto(mgmt, mgmt_buf);
@@ -90,10 +99,10 @@ int mqClientCreate(mqClient *client, mqStr topic) {
   send(client->sockfd, mgmt_buf, sizeof(mgmt_buf), 0);
   send(client->sockfd, topic.prt, topic.len, 0);
 
-  // todo: server response
-  char resp_buf[128] = {0};
-  recv(client->sockfd, resp_buf, sizeof(resp_buf), 0);
-  printf("resp: %s\n", resp_buf);
+  // server repsonse
+  // code = popcode();
+  pthread_mutex_unlock(&client->send_mtx);
+  // return code;
 }
 // ta funkcja ma tylko dołączać a nie odbiera dane ma toylko odebrać kod żę ok
 // odbieraniw wiadomości będzeie poprzez wywoływanie w pentli mqClientRecv
@@ -140,10 +149,41 @@ int mqClientSend(mqClient *client, mqStr topic, mqStr msg,
   send(client->sockfd, client->name.prt, client->name.len, 0);
   send(client->sockfd, msg.prt, msg.len, 0);
 
+  //  reurn popcode();
+  // recvall TA PENTLA
+
   // todo: server response => serwer nie powinien wysyłąć tego co dostał z tego
   // samego klienta tylko MQPACKET_CODE_OK ;
 }
 
+// code popcode() {
+//   for (;;) {
+//     mutex lok if client ma kod retur kod;
+//     mutex unlok sleep(10)
+//   }
+// }
+
+void mqClientRecwThread() {
+  // for (;;) {
+  //   recv(client->sockfd, pckt_buf, sizeof(pckt_buf), 0);
+  //   pckt = mqPacketHdrFrom(pckt_buf);
+  //   if (pckt.body_tag > 10) {
+  //     clie.code.append(code);
+  //   } else {
+  //     clie.messages.append(msg);
+  //   }
+  // }
+}
+
 mqStr mqClientName(mqClient *client) { return client->name; }
-int mqClientRecv(mqClient *client, mqMsg **msg) {}
+int mqClientRecv(mqClient *client, mqMsg **msg) {
+  for (;;) {
+    // mutex lok if client ma msg retur mgs;
+    // mutex unlok sleep(10)
+  }
+  // czyj jest już jakaś wiadomość jeśli tak to zwraca jeśli nie to czyta z
+  // sieci
+  //
+  //
+}
 int mqClientRecvFree(mqClient *client, mqMsg **msg) {}

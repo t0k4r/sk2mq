@@ -53,7 +53,6 @@ typedef struct {
 } Str;
 bool StrEqual(Str a, Str b) {
   if (a.len == b.len) {
-    printf("comparing %.*s and %.*s\n", (int)a.len, a.ptr, (int)b.len, b.ptr);
     return memcmp(a.ptr, b.ptr, b.len) == 0;
   }
   return false;
@@ -68,10 +67,6 @@ Str StrClientname(int fd) {
   Str client_name = (Str){.len = name_len, .ptr = zeroMalloc(name_len + 1)};
   sprintf(client_name.ptr, "user-%d", fd);
   return client_name;
-}
-Str StrInit(size_t len) {
-  Str s = {.ptr = zeroMalloc(len), .len = len};
-  return s;
 }
 void StrDeinit(Str *s) {
   free(s->ptr);
@@ -97,7 +92,7 @@ typedef struct {
 void ConnClientNextState(ConnClient *conn, ConnClientState state,
                          size_t data_total) {
   conn->state = state;
-  conn->data = zeroMalloc(data_total);
+  conn->data = data_total != 0 ? zeroMalloc(data_total) : NULL;
   conn->data_red = 0;
   conn->data_total = data_total;
 }
@@ -107,14 +102,13 @@ int ConnClientRead(ConnClient *client) {
                      client->data_total - client->data_red, MSG_DONTWAIT);
   if (red == -1 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
     return 0;
-  } else if (red == -1) {
-    return -1;
-  } else if (red == 0) {
+  } else if (red == 0 || (red == -1 && errno == ECONNRESET)) {
     client->state = CLIENT_DISCONECTED;
     return 0;
+  } else if (red == -1) {
+    return -1;
   }
   client->data_red += red;
-
   if (client->data_red != client->data_total)
     return 0;
   return 1;
@@ -128,13 +122,13 @@ typedef struct {
   };
 } Conn;
 
-void ConnDeinit(int epoll_fd, Conn *conn) {
+void ConnDeinit(Conn *conn) {
   switch (conn->tag) {
   case CONN_LISTENER: {
+    shutdown(conn->listener_fd, SHUT_RDWR);
     close(conn->listener_fd);
   } break;
   case CONN_CLIENT: {
-    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, conn->client.fd, NULL);
     shutdown(conn->client.fd, SHUT_RDWR);
     close(conn->client.fd);
     if (conn->client.data != NULL)
@@ -142,7 +136,6 @@ void ConnDeinit(int epoll_fd, Conn *conn) {
     StrDeinit(&conn->client.name);
   } break;
   }
-
   free(conn);
 }
 
@@ -268,7 +261,6 @@ int TopicBacklog(Topic *topic, ConnClient *client) {
       // todo: error handle
       int ret = MsgSend(client, mn->msg);
       assert(ret != -1);
-      // todo: sygnal koncowy i obsluga petli u klienta
     }
   }
   return 0;
@@ -319,7 +311,7 @@ int TopicSend(Topic *topic, Msg *msg) {
   return 0;
 }
 // remove meassages past due date;
-void TopicCleanupMessages(Topic *topic) {
+void TopicCleanup(Topic *topic) {
   time_t timestamp = time(NULL);
   for (MsgNode *root = topic->messages; root != NULL; root = root->next) {
     if ((uint32_t)timestamp < root->msg->hdr.due_timestamp)
@@ -327,15 +319,6 @@ void TopicCleanupMessages(Topic *topic) {
     logPrintf("removed expired message in %.*s\n", (int)root->msg->topic.len,
               root->msg->topic.ptr);
     topic->messages = MsgNodeDeinit(root);
-  }
-}
-
-void TopicCleanupConnections(Topic *topic) {
-  for (size_t i = 0; i < topic->connections_len; i++) {
-    Conn *conn = topic->connections[i];
-    if (conn->client.state == CLIENT_DISCONECTED) {
-      TopicQuit(topic, conn);
-    }
   }
 }
 
@@ -356,14 +339,14 @@ int TopicListFind(TopicList *tl, Str topic) {
   return -1;
 }
 
-void TopicListCleanupMessages(TopicList *tl) {
+void TopicListCleanup(TopicList *tl) {
   for (size_t i = 0; i < tl->count; i++) {
-    TopicCleanupMessages(&tl->topics[i]);
+    TopicCleanup(&tl->topics[i]);
   }
 }
-void TopicListCleanupConnections(TopicList *tl) {
+void TopicListDisconnect(TopicList *tl, Conn *conn) {
   for (size_t i = 0; i < tl->count; i++) {
-    TopicCleanupConnections(&tl->topics[i]);
+    TopicQuit(&tl->topics[i], conn);
   }
 }
 
@@ -396,7 +379,6 @@ int ServerInit(Server *srv, char *addr, uint16_t port) {
 int ServerAcceptConn(Server *srv) {
   struct sockaddr_in incoming = {0};
   socklen_t incoming_len = sizeof(incoming);
-  // todo: zapis adresu kleinta
   int sockfd = accept(srv->sockfd, (struct sockaddr *)&incoming, &incoming_len);
   if (sockfd == -1)
     return errno;
@@ -414,6 +396,7 @@ int ServerAcceptConn(Server *srv) {
   mqPacketHdr pckt = {.body_tag = MQPACKET_HELLO, .body_len = client_name.len};
   uint8_t pckt_buf[MQPACKET_SIZE] = {0};
   mqPacketHdrInto(pckt, pckt_buf);
+
   // todo: hanlde errors
   ret = send(sockfd, pckt_buf, sizeof(pckt_buf), 0);
   assert(ret != -1);
@@ -490,19 +473,18 @@ int ServerHandleMgmt(Server *srv, Conn *conn) {
   return 0;
 }
 
-int ServerHandleMsg(Server *srv, Conn *conn) {
+void ServerHandleMsg(Server *srv, Conn *conn) {
   ConnClient *client = &conn->client;
   assert(client->state == CLIENT_READING_MSG);
 
   int ret = ConnClientRead(client);
-  assert(ret != -1);
   if (ret == 0) {
-    return 0;
+    return;
   } else if (ret == -1) {
     assert(!"todo: handle failed read");
   }
-
   conn->client.state = CLIENT_WAITING;
+
   Msg *msg = MsgParse(client->data);
   assert(msg != NULL);
   logPrintf("==MSG== %.*s in %.*s sent %.*s\n", (int)msg->client.len,
@@ -510,35 +492,36 @@ int ServerHandleMsg(Server *srv, Conn *conn) {
             (int)msg->msg.len, msg->msg.ptr);
   int idx = TopicListFind(&srv->topics, msg->topic);
   if (idx == -1) {
-    logPrintf("topic does not exist\n");
-    // todo: return invalidd topic
+    logPrintf("%.*s does not exist\n", (int)msg->topic.len, msg->topic.ptr);
+    // todo: error handle;
     MsgDeinit(&msg);
     sendPacketCode(client->fd, MQPACKET_CODE_TOPIC_NOT_EXISTS);
-    return 0;
+    return;
   }
-  if (!StrEqual(conn->client.name, msg->client)) {
-    logPrintf("invalid client\n");
-    // todo: return bad client;
+  if (!StrEqual(client->name, msg->client)) {
+    logPrintf("expected %.*s found %.*s\n", (int)client->name.len,
+              client->name.ptr, (int)msg->client.len, msg->client.ptr);
+    // todo: error handle;
     MsgDeinit(&msg);
     sendPacketCode(client->fd, MQPACKET_CODE_BAD_CLEINT);
-    return 0;
+    return;
   }
 
   Topic *topic = &srv->topics.topics[idx];
   TopicSend(topic, msg);
   sendPacketCode(client->fd, MQPACKET_CODE_OK);
-  // todo hanlde erorrs and messages from past;
-  return 0;
+  // todo error handle;
+  return;
 }
 
-int ServerHandleProto(Server *srv, Conn *conn) {
+void ServerHandleProto(Server *srv, Conn *conn) {
   ConnClient *client = &conn->client;
+  assert(client->state == CLIENT_READING_PROTO);
+
   int ret = ConnClientRead(client);
   if (ret == 0) {
-    return 0;
+    return;
   } else if (ret == -1) {
-    client->state = CLIENT_DISCONECTED;
-    return -1;
     assert(!"todo: handle failed read");
   }
   mqPacketHdr pckt = mqPacketHdrFrom(client->data);
@@ -555,7 +538,20 @@ int ServerHandleProto(Server *srv, Conn *conn) {
   }
 }
 
-int ServerHandleRequest(Server *srv, Conn *conn) {
+void ServerHandleDisconnected(Server *srv, Conn *conn) {
+  ConnClient *client = &conn->client;
+  assert(client->state == CLIENT_DISCONECTED);
+
+  // todo: handle error
+  epoll_ctl(srv->epollfd, EPOLL_CTL_DEL, client->fd, NULL);
+
+  TopicListDisconnect(&srv->topics, conn);
+  logPrintf("%.*s disconected\n", (int)conn->client.name.len,
+            conn->client.name.ptr);
+  ConnDeinit(conn);
+}
+
+void ServerHandleRequest(Server *srv, Conn *conn) {
   ConnClient *client = &conn->client;
   switch (conn->client.state) {
   case CLIENT_WAITING: {
@@ -563,27 +559,18 @@ int ServerHandleRequest(Server *srv, Conn *conn) {
     return ServerHandleRequest(srv, conn);
   } break;
   case CLIENT_READING_PROTO: {
-    // logPrintf("handle proto\n");
     ServerHandleProto(srv, conn);
   } break;
   case CLIENT_READING_MSG: {
-    // logPrintf("handle msg\n");
     ServerHandleMsg(srv, conn);
   } break;
   case CLIENT_READING_MGMT: {
-    // logPrintf("handle mgmt\n");
     ServerHandleMgmt(srv, conn);
   } break;
   case CLIENT_DISCONECTED: {
-    // TODO: verifi
-    logPrintf("%.*s disconected\n", (int)conn->client.name.len,
-              conn->client.name.ptr);
-    TopicListCleanupConnections(&srv->topics);
-    ConnDeinit(srv->epollfd, conn);
+    ServerHandleDisconnected(srv, conn);
   } break;
   };
-
-  return 0;
 }
 
 int ServerRun(Server *srv) {
@@ -614,14 +601,14 @@ int ServerRun(Server *srv) {
       case CONN_LISTENER: {
         // logPrintf("accept connection\n");
         // todo: error handle
-        ServerAcceptConn(srv);
+        int ret = ServerAcceptConn(srv);
+        if (ret != 0) {
+          logPrintf("error accepting connection %s\n", strerror(ret));
+        }
       } break;
       case CONN_CLIENT: {
-        // logPrintf("handle request\n");
-        // todo: error handle
         ServerHandleRequest(srv, ev_conn);
       } break;
-        // todo: handle connection end
       }
     }
     // remove messages past due date
