@@ -209,10 +209,22 @@ void MgmtDeinit(Mgmt *mgmt) {
 int MsgSend(ConnClient *client, Msg *msg) {
   uint8_t msg_hdr_buf[MQMSG_SIZE] = {0};
   mqMsgHdrInto(msg->hdr, msg_hdr_buf);
-  
-  sendPacketCode(client->fd, 0); // testowe
 
-  int ret = sendAll(client->fd, msg_hdr_buf, sizeof(msg_hdr_buf));
+  uint8_t pckt_buf[MQPACKET_SIZE] = {0};
+  mqPacketHdrInto(
+      (mqPacketHdr){
+          .body_tag = MQPACKET_MSG,
+          .body_len = sizeof(msg_hdr_buf) + msg->topic.len + msg->client.len +
+                      msg->msg.len,
+      },
+      pckt_buf);
+
+  logPrintf("=> msg to %.*s\n", (int)client->name.len, client->name.ptr);
+
+  int ret = sendAll(client->fd, pckt_buf, sizeof(pckt_buf));
+  if (ret != 0)
+    return ret;
+  ret = sendAll(client->fd, msg_hdr_buf, sizeof(msg_hdr_buf));
   if (ret != 0)
     return ret;
   ret = sendAll(client->fd, msg->topic.ptr, msg->topic.len);
@@ -272,9 +284,8 @@ typedef struct {
 // send all messages to conn
 void TopicBacklog(Topic *topic, ConnClient *client) {
   time_t timestamp = time(NULL);
-
   for (MsgNode *mn = topic->messages; mn != NULL; mn = mn->next) {
-    if ((uint32_t)timestamp > mn->msg->hdr.due_timestamp) {
+    if ((uint32_t)timestamp < mn->msg->hdr.due_timestamp) {
 
       int ret = MsgSend(client, mn->msg);
       if (ret != 0) {
@@ -311,16 +322,15 @@ void TopicSend(Topic *topic, Msg *msg) {
   time_t timestamp = time(NULL);
   if ((uint32_t)timestamp < msg->hdr.due_timestamp) { // < bo chcemy wysclac
     // wiadomosc ktorej czas NIE zostal przekroczony
-    
+
     topic->messages = MsgNodeInsert(topic->messages, msg);
-    //printf("%ld\n",topic->connections_len);
 
     for (size_t i = 0; i < topic->connections_len; i++) {
       Conn *conn = topic->connections[i];
-      
-      //if (StrEqual(conn->client.top, msg->client) == false)
-        //continue; wtedy wysyla tylko do siebie? nie wiem czy topic sprawdzony
-      
+
+      if (StrEqual(conn->client.name, msg->client))
+        continue;
+
       int ret = MsgSend(&conn->client, msg);
       if (ret != 0) {
         logPrintf("failed to send msg to %.*s reason %s\n",
@@ -583,7 +593,7 @@ void ServerHandleProto(Server *srv, Conn *conn) {
   }
   mqPacketHdr pckt = mqPacketHdrFrom(client->data);
   free(client->data);
-  logPrintf("==PROTO== to read %u bytes\n", pckt.body_len);
+  // logPrintf("==PROTO== to read %u bytes\n", pckt.body_len);
 
   switch (pckt.body_tag) {
   case MQPACKET_MGMT: {
