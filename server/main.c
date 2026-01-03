@@ -209,7 +209,9 @@ void MgmtDeinit(Mgmt *mgmt) {
 int MsgSend(ConnClient *client, Msg *msg) {
   uint8_t msg_hdr_buf[MQMSG_SIZE] = {0};
   mqMsgHdrInto(msg->hdr, msg_hdr_buf);
-  printf("send");
+  
+  sendPacketCode(client->fd, 0); // testowe
+
   int ret = sendAll(client->fd, msg_hdr_buf, sizeof(msg_hdr_buf));
   if (ret != 0)
     return ret;
@@ -309,15 +311,16 @@ void TopicSend(Topic *topic, Msg *msg) {
   time_t timestamp = time(NULL);
   if ((uint32_t)timestamp < msg->hdr.due_timestamp) { // < bo chcemy wysclac
     // wiadomosc ktorej czas NIE zostal przekroczony
-    printf("send2\n");
+    
     topic->messages = MsgNodeInsert(topic->messages, msg);
-    printf("%ld\n",topic->connections_len);
+    //printf("%ld\n",topic->connections_len);
+
     for (size_t i = 0; i < topic->connections_len; i++) {
       Conn *conn = topic->connections[i];
-      printf("send3\n");
-      if (StrEqual(conn->client.name, msg->client) == false)
-        continue;
-      printf("send4\n");
+      
+      //if (StrEqual(conn->client.top, msg->client) == false)
+        //continue; wtedy wysyla tylko do siebie? nie wiem czy topic sprawdzony
+      
       int ret = MsgSend(&conn->client, msg);
       if (ret != 0) {
         logPrintf("failed to send msg to %.*s reason %s\n",

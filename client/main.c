@@ -22,12 +22,12 @@ int main(int argc, char **argv) {
 
   mqClientCreate(client, mqCStr("topic3"));
   // mqClientSend(client, mqCStr("topic3"), mqCStr("Hello, world"), 1898717378);
-  //  mqClientJoin(client, mqCStr("topic3"));
+  mqClientJoin(client, mqCStr("topic3"));
   // mqClientSend(client, mqCStr("topic3"), mqCStr("Hello, world 22"),
   // 1898717378);
-  mqClientSend(client, mqCStr("topic3"), mqCStr("Hello, world 44"), 1898717378);
-  mqClientSend(client, mqCStr("topic3"), mqCStr("Hello, world"),
-               mqTimeAfter(10)); // 1798717378);
+  mqClientSend(client, mqCStr("topic3"), mqCStr("Hello, world 445"), 1898717378);
+  //mqClientSend(client, mqCStr("topic3"), mqCStr("Hello, world"),
+   //            mqTimeAfter(10)); // 1798717378);
 
   printf("sent msgs\n");
   for (;;) {

@@ -23,11 +23,85 @@ struct mqMsgNode {
   mqMsgNode *next;
 };
 
+#define QQ_MESS 50
+#define QQ_CODE 50
+
+typedef struct{
+  size_t head;
+  size_t tail;
+  size_t len;
+  mqMsg* messages[QQ_MESS];
+} QMsg;
+
+typedef struct {
+  size_t head;
+  size_t tail;
+  size_t len;
+  uint8_t codes[QQ_CODE];
+} Qcodes;
+
+void QMsgInit(QMsg *qmsg){
+  qmsg->head = 0;
+  qmsg->tail = 0;
+  qmsg->len =0;
+}
+
+void QcodesInit(Qcodes *qcodes){
+  qcodes->head =0;
+  qcodes->tail =0;
+  qcodes->len =0;
+}
+
+int QMsgPush(QMsg *qmsg, mqMsg *msg){
+  if (qmsg->len == QQ_MESS){
+    return -1;
+  }
+  qmsg->messages[qmsg->tail] = msg;
+  qmsg->tail = (qmsg->tail +1) % QQ_MESS;
+  qmsg->len +=1;
+  return 0;
+}
+
+int QcodesPush(Qcodes *qcodes, uint8_t code){
+  if (qcodes->len == QQ_CODE){
+    return -1;
+  }
+  qcodes->codes[qcodes->tail] = code;
+  qcodes->tail = (qcodes->tail +1) % QQ_CODE;
+  qcodes->len +=1;
+  return 0;
+}
+
+int QMsgPop(QMsg *qmsg, mqMsg **msg){
+  if (qmsg->len ==0){
+    return -1;
+  }
+  *msg = qmsg->messages[qmsg->head];
+  qmsg->head = (qmsg->head +1) % QQ_MESS;
+  qmsg->len -=1;
+  return 0;
+}
+
+int qcodesPop(Qcodes *qcodes, uint8_t *code){
+  if (qcodes->len ==0){
+    return -1;
+  }
+  *code = qcodes->codes[qcodes->head];
+  qcodes->head = (qcodes->head +1) % QQ_CODE;
+  qcodes->len -=1;
+  return 0;
+}
+
+
+
+
 struct mqClient {
   int sockfd;
   mqStr name;
   pthread_mutex_t list_mtx;
   pthread_mutex_t send_mtx;
+  QMsg msg_Q;
+  Qcodes code_Q;
   // messages[];
   // codes[];
 };
@@ -163,13 +237,91 @@ int mqClientSend(mqClient *client, mqStr topic, mqStr msg,
 // }
 
 void *mqClientRecwThread(mqClient *client) {
-   for (;;) {
-     uint8_t pckt_buf[MQPACKET_SIZE]; // SPrawdzic czy przed kazdym msg jest pckt!!!
-    
-     recv(client->sockfd, pckt_buf, sizeof(pckt_buf), 0);
-     mqPacketHdr pckt = mqPacketHdrFrom(pckt_buf);
+   for (;;) {//Sprawdz czy pckt czy msg !
+     void* buf = malloc(MQPACKET_SIZE); // SPrawdzic czy przed kazdym msg jest pckt!!!
+     recv(client->sockfd, buf, MQPACKET_SIZE, 0);
+     //printf("recived sieze %ld\n",sizeof(buf));
 
-    printf("Received packet with tag: %d, length: %u\n", pckt.body_tag, pckt.body_len);
+     mqPacketHdr pckt = mqPacketHdrFrom(buf);
+
+     printf("Received packet with tag: %d, length: %u\n", pckt.body_tag, pckt.body_len);
+     if (pckt.body_tag != 0){
+        QcodesPush(&client->code_Q, pckt.body_tag);
+
+        //printf("Packet body length: %u\n", pckt.body_len);
+        //printf("codes in queue: %ld\n", client->code_Q.len); 
+        //for (size_t i = 0; i < client->code_Q.len; i++) {
+        //  size_t index = (client->code_Q.head + i) % QQ_CODE;
+        //  uint8_t queued_code = client->code_Q.codes[index];
+        //  printf("  Code: %d\n", queued_code);}
+        }
+      
+     
+
+     free(buf);
+     if (pckt.body_tag == 0){ //  < 10  ??
+
+      void *buf_msg = malloc(16);
+      recv(client->sockfd, buf_msg, 16, 0);
+      mqMsgHdr msg_hdr = mqMsgHdrFrom(buf_msg);
+      printf("Received message header with due timestamp: %u, client length: %u, topic length: %u, message length: %u\n",
+             msg_hdr.due_timestamp, msg_hdr.client_len, msg_hdr.topic_len, msg_hdr.msg_len);
+      
+      free(buf_msg);
+
+      /*mqMsg *new_msg = {.due_timestamp = msg_hdr.due_timestamp,
+                        .client = {.len = msg_hdr.client_len, .prt = NULL},
+                        .topic = {.len = msg_hdr.topic_len, .prt = NULL},
+                        .msg = {.len = msg_hdr.msg_len, .prt = NULL}};*/
+      
+      mqMsg *new_msg = malloc(sizeof(mqMsg));
+      new_msg->due_timestamp = msg_hdr.due_timestamp;
+      new_msg->client.len = msg_hdr.client_len;
+      new_msg->client.prt = malloc(msg_hdr.client_len);
+      new_msg->topic.len = msg_hdr.topic_len;
+      new_msg->topic.prt = malloc(msg_hdr.topic_len);
+      new_msg->msg.len = msg_hdr.msg_len;
+      new_msg->msg.prt = malloc(msg_hdr.msg_len);
+
+      //uint8_t* bufmsg = malloc(msg_hdr.topic_len);
+      recv(client->sockfd, new_msg->topic.prt, msg_hdr.topic_len, 0);
+
+      //printf("recived size %ld\n",sizeof(bufmsg));
+      printf("recived topic %s\n",new_msg->topic.prt);
+
+      //uint8_t* bufmsg2 = malloc(msg_hdr.client_len);
+      recv(client->sockfd, new_msg->client.prt, msg_hdr.client_len, 0);
+      //printf("recived size %ld\n",sizeof(bufmsg2));
+      printf("recived client %s\n",new_msg->client.prt);
+
+      //uint8_t* bufmsg3 = malloc(msg_hdr.msg_len);
+      recv(client->sockfd, new_msg->msg.prt, msg_hdr.msg_len, 0);
+      //printf("recived size %ld\n",sizeof(bufmsg3));
+      printf("recived msg %s\n",new_msg->msg.prt);
+
+      QMsgPush(&client->msg_Q, new_msg);
+
+      printf("Message received and added to queue. Queue length: %ld\n", client->msg_Q.len);
+      printf("Messeges in queue:\n");
+      for (size_t i = 0; i < client->msg_Q.len; i++) {
+        size_t index = (client->msg_Q.head + i) % QQ_MESS;
+        mqMsg *queued_msg = client->msg_Q.messages[index];
+        printf("  Topic: %.*s, Client: %.*s, Msg: %.*s\n",
+               (int)queued_msg->topic.len, queued_msg->topic.prt,
+               (int)queued_msg->client.len, queued_msg->client.prt,
+               (int)queued_msg->msg.len, queued_msg->msg.prt);
+      }
+
+      //mqMsgHdr msg_hdr = mqMsgHdrFrom(bufmsg);
+      //printf("Received message with due timestamp: %u, client length: %u, topic length: %u, message length: %u\n",
+      //msg_hdr.due_timestamp, msg_hdr.client_len, msg_hdr.topic_len, msg_hdr.msg_len);
+
+
+    }
+      
+   
+  }
+
      //printf("pckt_buf: %ld\n", sizeof(pckt_buf));
      //pckt = mqPacketHdrFrom(pckt_buf);
      //if (pckt.body_tag > 10) {
@@ -179,7 +331,7 @@ void *mqClientRecwThread(mqClient *client) {
 
        //clie.messages.append(msg);
      //}
-    }
+    
 }
 
 mqStr mqClientName(mqClient *client) { return client->name; }
