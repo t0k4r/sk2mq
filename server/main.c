@@ -273,7 +273,7 @@ void TopicBacklog(Topic *topic, ConnClient *client) {
 
   for (MsgNode *mn = topic->messages; mn != NULL; mn = mn->next) {
     if ((uint32_t)timestamp > mn->msg->hdr.due_timestamp) {
-      // todo: error handle
+
       int ret = MsgSend(client, mn->msg);
       if (ret != 0) {
         logPrintf("failed to send backlog to %.*s reason %s\n",
@@ -305,28 +305,26 @@ void TopicQuit(Topic *topic, Conn *conn) {
   }
 }
 // send/add message to topic
-int TopicSend(Topic *topic, Msg *msg) {
+void TopicSend(Topic *topic, Msg *msg) {
   time_t timestamp = time(NULL);
   if ((uint32_t)timestamp < msg->hdr.due_timestamp) { // < bo chcemy wysclac
     // wiadomosc ktorej czas NIE zostal przekroczony
-    // printf("Insertnodemes\n");
     topic->messages = MsgNodeInsert(topic->messages, msg);
     for (size_t i = 0; i < topic->connections_len; i++) {
-      // printf("sending mes to topicuser\n");
       Conn *conn = topic->connections[i];
 
-      // printf("conn clientname len %.*s,%.*s\n", (int)conn->client.name.len,
-      // conn->client.name.ptr, (int)msg->client.len, msg->client.ptr);
       if (StrEqual(conn->client.name, msg->client) == false)
         continue;
-      // todo: handle error
-      // printf("sending mes to topicuser2\n");
 
       int ret = MsgSend(&conn->client, msg);
-      assert(ret != -1);
+      if (ret != 0) {
+        logPrintf("failed to send msg to %.*s reason %s\n",
+                  (int)conn->client.name.len, conn->client.name.ptr,
+                  strerror(ret));
+      }
     }
   }
-  return 0;
+  return;
 }
 // remove meassages past due date;
 void TopicCleanup(Topic *topic) {
@@ -386,14 +384,17 @@ int ServerInit(Server *srv, char *addr, uint16_t port) {
 
   // handle error;
   int enable = 1;
-  setsockopt(srv->sockfd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
+  int ret = setsockopt(srv->sockfd, SOL_SOCKET, SO_REUSEADDR, &enable,
+                       sizeof(enable));
+  if (ret == -1)
+    return errno;
 
   struct sockaddr_in addr_in = (struct sockaddr_in){
       .sin_family = AF_INET,
       .sin_addr.s_addr = inet_addr(addr),
       .sin_port = htons(port),
   };
-  int ret = bind(srv->sockfd, (struct sockaddr *)&addr_in, sizeof(addr_in));
+  ret = bind(srv->sockfd, (struct sockaddr *)&addr_in, sizeof(addr_in));
   if (ret == -1)
     return errno;
   return 0;
@@ -671,17 +672,30 @@ int ServerRun(Server *srv) {
 }
 
 int main(int argc, char **argv) {
-  char *addr = "127.0.0.1";
+  char *addr = "0.0.0.0";
   uint16_t port = 7654;
-  Server srv = {0};
-  int err = 0;
+  int ret = 0;
 
-  if ((err = ServerInit(&srv, addr, port))) {
-    logFatalf("failed to initialize: %s\n", strerror(err));
+  if (argc == 3) {
+    addr = argv[1];
+    int ret = sscanf(argv[2], "%hd", &port);
+    if (ret != 1) {
+      logFatalf("unexpected port value %s\n", argv[2]);
+    }
+  } else if (argc == 1) {
+    logPrintf("running with default values\n");
+  } else {
+    logFatalf("expcted %s <address> <port>\n", argv[0]);
+  }
+
+  Server srv = {0};
+
+  if ((ret = ServerInit(&srv, addr, port))) {
+    logFatalf("failed to initialize: %s\n", strerror(ret));
   }
   logPrintf("listening on %s:%d\n", addr, port);
-  if ((err = ServerRun(&srv))) {
-    logFatalf("failed to run: %s\n", strerror(err));
+  if ((ret = ServerRun(&srv))) {
+    logFatalf("failed to run: %s\n", strerror(ret));
   }
   return 0;
 }
