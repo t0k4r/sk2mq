@@ -162,16 +162,24 @@ int mqClientSend(mqClient *client, mqStr topic, mqStr msg,
 //   }
 // }
 
-void mqClientRecwThread() {
-  // for (;;) {
-  //   recv(client->sockfd, pckt_buf, sizeof(pckt_buf), 0);
-  //   pckt = mqPacketHdrFrom(pckt_buf);
-  //   if (pckt.body_tag > 10) {
-  //     clie.code.append(code);
-  //   } else {
-  //     clie.messages.append(msg);
-  //   }
-  // }
+void *mqClientRecwThread(mqClient *client) {
+   for (;;) {
+     uint8_t pckt_buf[MQPACKET_SIZE]; // SPrawdzic czy przed kazdym msg jest pckt!!!
+    
+     recv(client->sockfd, pckt_buf, sizeof(pckt_buf), 0);
+     mqPacketHdr pckt = mqPacketHdrFrom(pckt_buf);
+
+    printf("Received packet with tag: %d, length: %u\n", pckt.body_tag, pckt.body_len);
+     //printf("pckt_buf: %ld\n", sizeof(pckt_buf));
+     //pckt = mqPacketHdrFrom(pckt_buf);
+     //if (pckt.body_tag > 10) {
+       //clie.code.append(code);
+     //} else {
+       //mqMsg *msg = {0};
+
+       //clie.messages.append(msg);
+     //}
+    }
 }
 
 mqStr mqClientName(mqClient *client) { return client->name; }
