@@ -9,7 +9,7 @@ lib:
 	$(CC) $(CFLAGS) -fPIC -shared lib/libmq.c -o libmq.so
 
 client: lib
-	$(CC) $(CFLAGS) -L. -lmq client/main.c libmq.so -o sk2mqc
+	$(CC) $(CFLAGS) -L. -lmq -Wl,-rpath=./ client/main.c libmq.so -o sk2mqc
 
 server:
 	$(CC) $(CFLAGS) server/main.c -o sk2mqs
