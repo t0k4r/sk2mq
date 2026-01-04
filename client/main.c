@@ -8,15 +8,6 @@
 #include <time.h>
 
 #define READBUF 1024
-#define debug() printf("%s:%d\n", __FILE__, __LINE__)
-#define STRINGIFY1(X) STRINGIFY2(X)
-#define STRINGIFY2(X) #X
-#define logPrintf(...) printf(__FILE__ ":" STRINGIFY1(__LINE__) " " __VA_ARGS__)
-#define logFatalf(...)                                                         \
-  do {                                                                         \
-    logPrintf(__VA_ARGS__);                                                    \
-    exit(-1);                                                                  \
-  } while (0);
 
 void *ReadLoop(void *arg) {
   mqClient *client = arg;
@@ -24,9 +15,9 @@ void *ReadLoop(void *arg) {
     mqMsg *msg = NULL;
     mqClientRecv(client, &msg);
 
-    logPrintf("from %.*s in %.*s message %.*s\n", (int)msg->client.len,
-              msg->client.prt, (int)msg->topic.len, msg->topic.prt,
-              (int)msg->msg.len, msg->msg.prt);
+    printf("\nfrom %.*s in %.*s message %.*s\n", (int)msg->client.len,
+           msg->client.prt, (int)msg->topic.len, msg->topic.prt,
+           (int)msg->msg.len, msg->msg.prt);
 
     mqClientRecvFree(client, &msg);
   }
@@ -40,9 +31,10 @@ int main(int argc, char **argv) {
     addr = argv[1];
     port = argv[2];
   } else if (argc == 1) {
-    logPrintf("running with default values\n");
+    printf("running with default values\n");
   } else {
-    logFatalf("expcted %s <address> <port>\n", argv[0]);
+    printf("expcted %s <address> <port>\n", argv[0]);
+    exit(-1);
   }
 
   mqClient *client = NULL;
@@ -52,34 +44,33 @@ int main(int argc, char **argv) {
 
   for (;;) {
     printf(
-        "(c: create topic, j: join topic, q: quit topic, m: send message): ");
+        "\n(c: create topic, j: join topic, q: quit topic, m: send message): ");
     fflush(stdout);
     char c = getchar();
-    printf("\n\n%c\n\n", c);
     switch (c) {
     case 'c': {
-      printf("create topic: ");
+      printf("\ncreate topic: ");
       fflush(stdout);
       char topic[READBUF] = {0};
       scanf("%s", topic);
       mqClientCreate(client, mqCStr(topic));
     } break;
     case 'j': {
-      printf("join topic: ");
+      printf("\njoin topic: ");
       fflush(stdout);
       char topic[READBUF] = {0};
       scanf("%s", topic);
       mqClientJoin(client, mqCStr(topic));
     } break;
     case 'q': {
-      printf("quit topic: ");
+      printf("\nquit topic: ");
       fflush(stdout);
       char topic[READBUF] = {0};
       scanf("%s", topic);
       mqClientQuit(client, mqCStr(topic));
     } break;
     case 'm': {
-      printf("send topic: ");
+      printf("\nsend topic: ");
       fflush(stdout);
       char topic[READBUF] = {0};
       scanf("%s", topic);
