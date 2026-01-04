@@ -99,9 +99,10 @@ struct mqClient {
   int sockfd;
   mqStr name;
   pthread_t thread_reading;
-  pthread_mutex_t list_mtx;
   pthread_mutex_t send_mtx;
-  pthread_cond_t send_cond;
+  pthread_mutex_t list_mtx;
+  pthread_mutex_t pop_mtx;
+  pthread_cond_t pop_cond;
   QMsg msg_Q;
   Qcodes code_Q;
   // messages[];
@@ -111,19 +112,19 @@ struct mqClient {
 void *mqClientRecwThread(mqClient *client);
 
 int popcode(mqClient *client) {
-  pthread_mutex_lock(&client->send_mtx);
+  pthread_mutex_lock(&client->pop_mtx);
   uint8_t code;
   for (;;) {
     while(client->code_Q.len == 0)
     {
-      pthread_cond_wait(&client->send_cond, &client->send_mtx);
+      pthread_cond_wait(&client->pop_cond, &client->pop_mtx);
     }
 
     if (qcodesPop(&client->code_Q, &code) == 0) {
-      pthread_mutex_unlock(&client->send_mtx);
+      pthread_mutex_unlock(&client->pop_mtx);
       return code;
     }
-    pthread_mutex_unlock(&client->send_mtx);
+    pthread_mutex_unlock(&client->pop_mtx);
     usleep(10000); // sleep for 10 milliseconds
   }
   //return code;
@@ -186,7 +187,7 @@ int mqClientInit(mqClient **client, char *addr, char *port) {
 }
 void mqClientDeinit(mqClient **client) {}
 int mqClientCreate(mqClient *client, mqStr topic) {
-  //pthread_mutex_lock(&client->send_mtx);
+  pthread_mutex_lock(&client->send_mtx);
 
   mqMgmtHdr mgmt = {.action = MQACTION_CREATE, .topic_len = topic.len};
   uint8_t mgmt_buf[MQMGMT_SIZE] = {0};
@@ -202,20 +203,18 @@ int mqClientCreate(mqClient *client, mqStr topic) {
   send(client->sockfd, mgmt_buf, sizeof(mgmt_buf), 0);
   send(client->sockfd, topic.prt, topic.len, 0);
 
-
-  pthread_mutex_unlock(&client->send_mtx);
   // server repsonse
 
   int pcode = popcode(client);
   //printf("popcode %d\n", pcode);
-  //pthread_mutex_unlock(&client->send_mtx);
+  pthread_mutex_unlock(&client->send_mtx);
   return pcode;
   // return code;
 }
 // ta funkcja ma tylko dołączać a nie odbiera dane ma toylko odebrać kod żę ok
 // odbieraniw wiadomości będzeie poprzez wywoływanie w pentli mqClientRecv
 int mqClientJoin(mqClient *client, mqStr topic) {
-  //pthread_mutex_lock(&client->send_mtx);
+  pthread_mutex_lock(&client->send_mtx);
   mqMgmtHdr mgmt = {.action = MQACTION_JOIN, .topic_len = topic.len};
   uint8_t mgmt_buf[MQMGMT_SIZE] = {0};
   mqMgmtHdrInto(mgmt, mgmt_buf);
@@ -230,20 +229,42 @@ int mqClientJoin(mqClient *client, mqStr topic) {
   send(client->sockfd, mgmt_buf, sizeof(mgmt_buf), 0);
   send(client->sockfd, topic.prt, topic.len, 0);
 
-  pthread_mutex_unlock(&client->send_mtx);
+  //pthread_mutex_unlock(&client->pop_mtx);
 
   int pcode = popcode(client);
   //printf("popcode %d\n", pcode);
-  //pthread_mutex_unlock(&client->send_mtx);
+  pthread_mutex_unlock(&client->send_mtx);
   return pcode;
 
   // todo: server response => w sensie MQPACKET_CODE_OK jeżeli inny to zwrócić
   // error
 }
-int mqClientQuit(mqClient *client, mqStr topic) {}
+int mqClientQuit(mqClient *client, mqStr topic) {
+  pthread_mutex_lock(&client->send_mtx);
+  mqMgmtHdr mgmt = {.action = MQACTION_QUIT, .topic_len = topic.len};
+  uint8_t mgmt_buf[MQMGMT_SIZE] = {0};
+  mqMgmtHdrInto(mgmt, mgmt_buf);
+
+  mqPacketHdr pckt = {.body_tag = MQPACKET_MGMT,
+                      .body_len = sizeof(mgmt_buf) + topic.len};
+  uint8_t pckt_buf[MQPACKET_SIZE] = {0};
+  mqPacketHdrInto(pckt, pckt_buf);
+
+  // todo: handle send failure
+  send(client->sockfd, pckt_buf, sizeof(pckt_buf), 0);
+  send(client->sockfd, mgmt_buf, sizeof(mgmt_buf), 0);
+  send(client->sockfd, topic.prt, topic.len, 0);
+
+  //pthread_mutex_unlock(&client->pop_mtx);
+
+  int pcode = popcode(client);
+  //printf("popcode %d\n", pcode);
+  pthread_mutex_unlock(&client->send_mtx);
+  return pcode;
+}
 int mqClientSend(mqClient *client, mqStr topic, mqStr msg,
                  uint32_t due_timestamp) {
-  //pthread_mutex_lock(&client->send_mtx);
+  pthread_mutex_lock(&client->send_mtx);
 
   mqMsgHdr msg_hdr = {
       .due_timestamp = due_timestamp,
@@ -267,11 +288,11 @@ int mqClientSend(mqClient *client, mqStr topic, mqStr msg,
   send(client->sockfd, client->name.prt, client->name.len, 0);
   send(client->sockfd, msg.prt, msg.len, 0);
 
-  //pthread_mutex_unlock(&client->send_mtx);
+  //pthread_mutex_unlock(&client->pop_mtx);
 
   int pcode = popcode(client);
   //printf("popcode %d\n", pcode);
-  //pthread_mutex_unlock(&client->send_mtx);
+  pthread_mutex_unlock(&client->send_mtx);
   return pcode;
 
   //  reurn popcode();
@@ -298,10 +319,10 @@ void *mqClientRecwThread(mqClient *client) {// do init
 
      //printf("Received packet with tag: %d, length: %u\n", pckt.body_tag, pckt.body_len);
      if (pckt.body_tag != 0){
-        pthread_mutex_lock(&client->send_mtx);
+        pthread_mutex_lock(&client->pop_mtx);
         QcodesPush(&client->code_Q, pckt.body_tag);
-        pthread_cond_signal(&client->send_cond);
-        pthread_mutex_unlock(&client->send_mtx);
+        pthread_cond_signal(&client->pop_cond); // moze pusc
+        pthread_mutex_unlock(&client->pop_mtx);
 
 
         //printf("Packet body length: %u\n", pckt.body_len);
