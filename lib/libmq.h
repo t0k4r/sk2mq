@@ -27,5 +27,5 @@ typedef struct {
   mqStr msg;
 } mqMsg;
 void mqClientRecv(mqClient *client, mqMsg **msg);
-int mqClientRecvFree(mqClient *client, mqMsg **msg);
+int mqClientRecvFree(mqMsg **msg);
 #endif

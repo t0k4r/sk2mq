@@ -19,14 +19,14 @@ void *ReadLoop(void *arg) {
            msg->client.prt, (int)msg->topic.len, msg->topic.prt,
            (int)msg->msg.len, msg->msg.prt);
 
-    mqClientRecvFree(client, &msg);
+    mqClientRecvFree(&msg);
   }
 }
 
 int main(int argc, char **argv) {
   char *addr = "0.0.0.0";
   char *port = "7654";
-  int ret = 0;
+
   if (argc == 3) {
     addr = argv[1];
     port = argv[2];
@@ -40,7 +40,7 @@ int main(int argc, char **argv) {
   mqClient *client = NULL;
   mqClientInit(&client, addr, port);
   pthread_t read_th;
-  ret = pthread_create(&read_th, NULL, (void *(*)(void *))ReadLoop, client);
+  pthread_create(&read_th, NULL, (void *(*)(void *))ReadLoop, client);
 
   for (;;) {
     printf(

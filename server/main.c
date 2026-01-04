@@ -579,7 +579,7 @@ int ServerHandleMsg(Server *srv, Conn *conn) {
   return 0;
 }
 
-void ServerHandleProto(Server *srv, Conn *conn) {
+void ServerHandleProto(Conn *conn) {
   ConnClient *client = &conn->client;
   assert(client->state == CLIENT_READING_PROTO);
 
@@ -625,7 +625,7 @@ void ServerHandleRequest(Server *srv, Conn *conn) {
     return ServerHandleRequest(srv, conn);
   } break;
   case CLIENT_READING_PROTO: {
-    ServerHandleProto(srv, conn);
+    ServerHandleProto(conn);
   } break;
   case CLIENT_READING_MSG: {
     int ret = ServerHandleMsg(srv, conn);
