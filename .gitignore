@@ -1,5 +1,6 @@
 a.out
 vgcore.*
 libmq.o
+libmq.so
 sk2mqc
 sk2mqs

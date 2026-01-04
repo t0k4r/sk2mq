@@ -6,13 +6,13 @@ CFLAGS = -Wall -Wextra
 all: lib client server
 
 lib:
-	$(CC) $(CFLAGS) -c lib/libmq.c -o libmq.o
+	$(CC) $(CFLAGS) -fPIC -shared lib/libmq.c -o libmq.so
 
 client: lib
-	$(CC) $(CFLAGS) client/main.c libmq.o -o sk2mqc
+	$(CC) $(CFLAGS) -L. -lmq client/main.c libmq.so -o sk2mqc
 
 server:
 	$(CC) $(CFLAGS) server/main.c -o sk2mqs
 
 clean:
-	rm -f sk2mqs sk2mqc libmq.o
+	rm -f sk2mqs sk2mqc libmq.so
