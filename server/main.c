@@ -297,7 +297,12 @@ void TopicBacklog(Topic *topic, ConnClient *client) {
   }
 }
 
-void TopicJoin(Topic *topic, Conn *conn) {
+// false was alredy in true joined
+bool TopicJoin(Topic *topic, Conn *conn) {
+  for (size_t i = 0; i < topic->connections_len; i++) {
+    if (topic->connections[i]->client.fd == conn->client.fd)
+      return false;
+  }
   if (topic->connections_len >= topic->connections_cap) {
     topic->connections_cap =
         topic->connections_cap == 0 ? 4 : topic->connections_cap * 2;
@@ -306,6 +311,7 @@ void TopicJoin(Topic *topic, Conn *conn) {
                 topic->connections_cap * sizeof(*topic->connections));
   }
   topic->connections[topic->connections_len++] = conn;
+  return true;
 }
 void TopicQuit(Topic *topic, Conn *conn) {
   for (size_t i = 0; i < topic->connections_len; i++) {
@@ -489,15 +495,22 @@ int ServerHandleMgmt(Server *srv, Conn *conn) {
     int idx = TopicListFind(&srv->topics, mgmt->topic);
     if (idx != -1) {
       Topic *topic = &srv->topics.topics[idx];
-      TopicJoin(topic, conn);
-      logPrintf("==MGMT== %.*s joined %.*s\n", (int)client->name.len,
-                client->name.ptr, (int)topic->name.len, topic->name.ptr);
-      ret = sendPacketCode(client->fd, MQPACKET_CODE_OK);
-      if (ret != 0) {
-        MgmtDeinit(mgmt);
-        return ret;
+      if (TopicJoin(topic, conn)) {
+        logPrintf("==MGMT== %.*s joined %.*s\n", (int)client->name.len,
+                  client->name.ptr, (int)topic->name.len, topic->name.ptr);
+        ret = sendPacketCode(client->fd, MQPACKET_CODE_OK);
+        if (ret != 0) {
+          MgmtDeinit(mgmt);
+          return ret;
+        }
+        TopicBacklog(topic, client);
+      } else {
+        ret = sendPacketCode(client->fd, MQPACKET_CODE_OK);
+        if (ret != 0) {
+          MgmtDeinit(mgmt);
+          return ret;
+        }
       }
-      TopicBacklog(topic, client);
     } else {
       ret = sendPacketCode(client->fd, MQPACKET_CODE_TOPIC_NOT_EXISTS);
       if (ret != 0) {
