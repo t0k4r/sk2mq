@@ -363,7 +363,7 @@ void TopicListAdd(TopicList *tl, Str name) {
     tl->capacity = tl->capacity == 0 ? 4 : tl->capacity * 2;
     tl->topics = realloc(tl->topics, tl->capacity * sizeof(Topic));
   }
-  tl->topics[tl->count].name = StrClone(name);
+  tl->topics[tl->count] = (Topic){.name = StrClone(name)};
   tl->count++;
 }
 
@@ -469,7 +469,7 @@ int ServerHandleMgmt(Server *srv, Conn *conn) {
   case MQACTION_CREATE: {
     int idx = TopicListFind(&srv->topics, mgmt->topic);
     if (idx == -1) {
-      TopicListAdd(&srv->topics, StrClone(mgmt->topic));
+      TopicListAdd(&srv->topics, mgmt->topic);
       logPrintf("==MGMT== %.*s created %.*s\n", (int)client->name.len,
                 client->name.ptr, (int)mgmt->topic.len, mgmt->topic.ptr);
       ret = sendPacketCode(client->fd, MQPACKET_CODE_OK);
@@ -527,6 +527,7 @@ int ServerHandleMgmt(Server *srv, Conn *conn) {
     }
   } break;
   }
+  MgmtDeinit(mgmt);
   return 0;
 }
 
