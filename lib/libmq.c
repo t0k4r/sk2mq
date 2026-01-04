@@ -32,12 +32,18 @@ int mqSendAll(int fd, void *buf, size_t n) {
   return 0;
 }
 
-int mqRecvAll(int fd, void *buf, size_t n) {
+int mqRecvAll(int fd, bool *dead, void *buf, size_t n) {
   size_t total = 0;
   do {
-    ssize_t ret = recv(fd, buf + total, n - total, 0);
-    if (ret == -1)
+    ssize_t ret = recv(fd, buf + total, n - total, MSG_WAITALL);
+    if (ret == 0) {
+      *dead = true;
+      return ECONNRESET;
+    } else if (ret == -1) {
+      if (errno == ECONNRESET)
+        *dead = true;
       return errno;
+    }
     total += ret;
   } while (total != n);
   return 0;
@@ -86,6 +92,7 @@ struct mqClient {
   pthread_cond_t code_pop_cond;
   bool has_code;
   uint8_t code;
+  bool dead;
 };
 
 void *mqClientRecwThread(mqClient *client);
@@ -117,8 +124,9 @@ mqRet mqClientInit(mqClient **client, char *addr, char *port) {
   }
   freeaddrinfo(ai);
 
+  bool dead = false;
   uint8_t pckt_buf[MQPACKET_SIZE] = {0};
-  ret = mqRecvAll(sockfd, pckt_buf, MQPACKET_SIZE);
+  ret = mqRecvAll(sockfd, &dead, pckt_buf, MQPACKET_SIZE);
   if (ret != 0) {
     return mqErrno(ret);
   }
@@ -130,7 +138,7 @@ mqRet mqClientInit(mqClient **client, char *addr, char *port) {
       .len = pckt.body_len,
   };
 
-  ret = mqRecvAll(sockfd, name.prt, name.len);
+  ret = mqRecvAll(sockfd, &dead, name.prt, name.len);
   if (ret != 0) {
     return mqErrno(ret);
   }
@@ -139,6 +147,7 @@ mqRet mqClientInit(mqClient **client, char *addr, char *port) {
   *new_client = (mqClient){
       .sockfd = sockfd,
       .name = name,
+      .dead = dead,
       .code_pop_cond = PTHREAD_COND_INITIALIZER,
       .code_pop_mtx = PTHREAD_MUTEX_INITIALIZER,
       .msg_cond = PTHREAD_COND_INITIALIZER,
@@ -166,7 +175,12 @@ void mqClientDeinit(mqClient **client) {
 uint8_t mqClientCodePop(mqClient *client) {
   pthread_mutex_lock(&client->code_pop_mtx);
   while (!client->has_code)
-    pthread_cond_wait(&client->code_pop_cond, &client->code_pop_mtx);
+    if (client->dead) {
+      client->code = MQCODE_DEAD;
+      client->has_code = true;
+    } else {
+      pthread_cond_wait(&client->code_pop_cond, &client->code_pop_mtx);
+    }
   uint8_t code = client->code;
 
   client->has_code = false;
@@ -292,7 +306,7 @@ mqRet mqClientSend(mqClient *client, mqStr topic, mqStr msg,
 void *mqClientRecwThread(mqClient *client) {
   for (;;) {
     uint8_t buf[MQPACKET_SIZE] = {0};
-    int ret = mqRecvAll(client->sockfd, buf, MQPACKET_SIZE);
+    int ret = mqRecvAll(client->sockfd, &client->dead, buf, MQPACKET_SIZE);
     if (ret != 0) {
       if (ret == ECONNRESET) {
         return NULL;
@@ -312,7 +326,7 @@ void *mqClientRecwThread(mqClient *client) {
     } else if (pckt.body_tag == 0) {
 
       uint8_t buf_msg[MQMSG_SIZE] = {0};
-      int ret = mqRecvAll(client->sockfd, buf_msg, MQMSG_SIZE);
+      int ret = mqRecvAll(client->sockfd, &client->dead, buf_msg, MQMSG_SIZE);
       mqMsgHdr msg_hdr = mqMsgHdrFrom(buf_msg);
 
       mqMsg *new_msg = malloc(sizeof(mqMsg));
@@ -324,7 +338,8 @@ void *mqClientRecwThread(mqClient *client) {
       new_msg->msg.len = msg_hdr.msg_len;
       new_msg->msg.prt = malloc(msg_hdr.msg_len);
 
-      ret = mqRecvAll(client->sockfd, new_msg->topic.prt, msg_hdr.topic_len);
+      ret = mqRecvAll(client->sockfd, &client->dead, new_msg->topic.prt,
+                      msg_hdr.topic_len);
       if (ret != 0) {
         mqClientRecvFree(&new_msg);
         if (ret == ECONNRESET) {
@@ -334,7 +349,8 @@ void *mqClientRecwThread(mqClient *client) {
         }
       }
 
-      ret = mqRecvAll(client->sockfd, new_msg->client.prt, msg_hdr.client_len);
+      ret = mqRecvAll(client->sockfd, &client->dead, new_msg->client.prt,
+                      msg_hdr.client_len);
       if (ret != 0) {
         mqClientRecvFree(&new_msg);
         if (ret == ECONNRESET) {
@@ -344,7 +360,8 @@ void *mqClientRecwThread(mqClient *client) {
         }
       }
 
-      ret = mqRecvAll(client->sockfd, new_msg->msg.prt, msg_hdr.msg_len);
+      ret = mqRecvAll(client->sockfd, &client->dead, new_msg->msg.prt,
+                      msg_hdr.msg_len);
       if (ret != 0) {
         mqClientRecvFree(&new_msg);
         if (ret == ECONNRESET) {
@@ -371,6 +388,10 @@ void *mqClientRecwThread(mqClient *client) {
 
 mqStr mqClientName(mqClient *client) { return client->name; }
 void mqClientRecv(mqClient *client, mqMsg **msg) {
+  if (client->dead) {
+    *msg = NULL;
+    return;
+  }
   pthread_mutex_lock(&client->msg_mtx);
   while (client->msg_queue.len == 0)
     pthread_cond_wait(&client->msg_cond, &client->msg_mtx);

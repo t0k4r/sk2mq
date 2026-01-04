@@ -14,6 +14,8 @@
 #define MQCODE_TOPIC_NOT_EXISTS 44
 // used to indicate internal server error
 #define MQCODE_SERVER_ERROR 50
+// connection lost
+#define MQCODE_DEAD 99
 
 typedef struct {
   // tag is used to indicate from where retirn valie originates
