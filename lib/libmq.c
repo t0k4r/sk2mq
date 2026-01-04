@@ -98,13 +98,37 @@ int qcodesPop(Qcodes *qcodes, uint8_t *code){
 struct mqClient {
   int sockfd;
   mqStr name;
+  pthread_t thread_reading;
   pthread_mutex_t list_mtx;
   pthread_mutex_t send_mtx;
+  pthread_cond_t send_cond;
   QMsg msg_Q;
   Qcodes code_Q;
   // messages[];
   // codes[];
 };
+
+void *mqClientRecwThread(mqClient *client);
+
+int popcode(mqClient *client) {
+  pthread_mutex_lock(&client->send_mtx);
+  uint8_t code;
+  for (;;) {
+    while(client->code_Q.len == 0)
+    {
+      pthread_cond_wait(&client->send_cond, &client->send_mtx);
+    }
+
+    if (qcodesPop(&client->code_Q, &code) == 0) {
+      pthread_mutex_unlock(&client->send_mtx);
+      return code;
+    }
+    pthread_mutex_unlock(&client->send_mtx);
+    usleep(10000); // sleep for 10 milliseconds
+  }
+  //return code;
+}
+
 mqStr mqCStr(char *cstr) { return (mqStr){.prt = cstr, .len = strlen(cstr)}; }
 uint32_t mqTimeAfter(uint32_t seconds) {
   time_t timestamp = time(NULL);
@@ -152,11 +176,17 @@ int mqClientInit(mqClient **client, char *addr, char *port) {
 
   printf("got name: %.*s\n", (int)new_client->name.len, new_client->name.prt);
   *client = new_client;
+
+  ret = pthread_create(&new_client->thread_reading, NULL,
+                          (void *(*)(void *))mqClientRecwThread, new_client);
+  if (ret == -1)
+    return errno;
+
   return 0;
 }
 void mqClientDeinit(mqClient **client) {}
 int mqClientCreate(mqClient *client, mqStr topic) {
-  pthread_mutex_lock(&client->send_mtx);
+  //pthread_mutex_lock(&client->send_mtx);
 
   mqMgmtHdr mgmt = {.action = MQACTION_CREATE, .topic_len = topic.len};
   uint8_t mgmt_buf[MQMGMT_SIZE] = {0};
@@ -172,14 +202,20 @@ int mqClientCreate(mqClient *client, mqStr topic) {
   send(client->sockfd, mgmt_buf, sizeof(mgmt_buf), 0);
   send(client->sockfd, topic.prt, topic.len, 0);
 
-  // server repsonse
-  // code = popcode();
+
   pthread_mutex_unlock(&client->send_mtx);
+  // server repsonse
+
+  int pcode = popcode(client);
+  //printf("popcode %d\n", pcode);
+  //pthread_mutex_unlock(&client->send_mtx);
+  return pcode;
   // return code;
 }
 // ta funkcja ma tylko dołączać a nie odbiera dane ma toylko odebrać kod żę ok
 // odbieraniw wiadomości będzeie poprzez wywoływanie w pentli mqClientRecv
 int mqClientJoin(mqClient *client, mqStr topic) {
+  //pthread_mutex_lock(&client->send_mtx);
   mqMgmtHdr mgmt = {.action = MQACTION_JOIN, .topic_len = topic.len};
   uint8_t mgmt_buf[MQMGMT_SIZE] = {0};
   mqMgmtHdrInto(mgmt, mgmt_buf);
@@ -194,12 +230,21 @@ int mqClientJoin(mqClient *client, mqStr topic) {
   send(client->sockfd, mgmt_buf, sizeof(mgmt_buf), 0);
   send(client->sockfd, topic.prt, topic.len, 0);
 
+  pthread_mutex_unlock(&client->send_mtx);
+
+  int pcode = popcode(client);
+  //printf("popcode %d\n", pcode);
+  //pthread_mutex_unlock(&client->send_mtx);
+  return pcode;
+
   // todo: server response => w sensie MQPACKET_CODE_OK jeżeli inny to zwrócić
   // error
 }
 int mqClientQuit(mqClient *client, mqStr topic) {}
 int mqClientSend(mqClient *client, mqStr topic, mqStr msg,
                  uint32_t due_timestamp) {
+  //pthread_mutex_lock(&client->send_mtx);
+
   mqMsgHdr msg_hdr = {
       .due_timestamp = due_timestamp,
       .topic_len = topic.len,
@@ -222,6 +267,13 @@ int mqClientSend(mqClient *client, mqStr topic, mqStr msg,
   send(client->sockfd, client->name.prt, client->name.len, 0);
   send(client->sockfd, msg.prt, msg.len, 0);
 
+  //pthread_mutex_unlock(&client->send_mtx);
+
+  int pcode = popcode(client);
+  //printf("popcode %d\n", pcode);
+  //pthread_mutex_unlock(&client->send_mtx);
+  return pcode;
+
   //  reurn popcode();
   // recvall TA PENTLA
 
@@ -236,17 +288,21 @@ int mqClientSend(mqClient *client, mqStr topic, mqStr msg,
 //   }
 // }
 
-void *mqClientRecwThread(mqClient *client) {
-   for (;;) {//Sprawdz czy pckt czy msg !
+void *mqClientRecwThread(mqClient *client) {// do init
+   for (;;) {
      void* buf = malloc(MQPACKET_SIZE); // SPrawdzic czy przed kazdym msg jest pckt!!!
      recv(client->sockfd, buf, MQPACKET_SIZE, 0);
      //printf("recived sieze %ld\n",sizeof(buf));
 
      mqPacketHdr pckt = mqPacketHdrFrom(buf);
 
-     printf("Received packet with tag: %d, length: %u\n", pckt.body_tag, pckt.body_len);
+     //printf("Received packet with tag: %d, length: %u\n", pckt.body_tag, pckt.body_len);
      if (pckt.body_tag != 0){
+        pthread_mutex_lock(&client->send_mtx);
         QcodesPush(&client->code_Q, pckt.body_tag);
+        pthread_cond_signal(&client->send_cond);
+        pthread_mutex_unlock(&client->send_mtx);
+
 
         //printf("Packet body length: %u\n", pckt.body_len);
         //printf("codes in queue: %ld\n", client->code_Q.len); 
@@ -264,8 +320,8 @@ void *mqClientRecwThread(mqClient *client) {
       void *buf_msg = malloc(16);
       recv(client->sockfd, buf_msg, 16, 0);
       mqMsgHdr msg_hdr = mqMsgHdrFrom(buf_msg);
-      printf("Received message header with due timestamp: %u, client length: %u, topic length: %u, message length: %u\n",
-             msg_hdr.due_timestamp, msg_hdr.client_len, msg_hdr.topic_len, msg_hdr.msg_len);
+      //printf("Received message header with due timestamp: %u, client length: %u, topic length: %u, message length: %u\n",
+      //       msg_hdr.due_timestamp, msg_hdr.client_len, msg_hdr.topic_len, msg_hdr.msg_len);
       
       free(buf_msg);
 
@@ -287,21 +343,23 @@ void *mqClientRecwThread(mqClient *client) {
       recv(client->sockfd, new_msg->topic.prt, msg_hdr.topic_len, 0);
 
       //printf("recived size %ld\n",sizeof(bufmsg));
-      printf("recived topic %s\n",new_msg->topic.prt);
+      //printf("recived topic %s\n",new_msg->topic.prt);
 
       //uint8_t* bufmsg2 = malloc(msg_hdr.client_len);
       recv(client->sockfd, new_msg->client.prt, msg_hdr.client_len, 0);
       //printf("recived size %ld\n",sizeof(bufmsg2));
-      printf("recived client %s\n",new_msg->client.prt);
+      //printf("recived client %s\n",new_msg->client.prt);
 
       //uint8_t* bufmsg3 = malloc(msg_hdr.msg_len);
       recv(client->sockfd, new_msg->msg.prt, msg_hdr.msg_len, 0);
       //printf("recived size %ld\n",sizeof(bufmsg3));
-      printf("recived msg %s\n",new_msg->msg.prt);
+      //printf("recived msg %s\n",new_msg->msg.prt);
 
+      pthread_mutex_lock(&client->list_mtx);
       QMsgPush(&client->msg_Q, new_msg);
+      pthread_mutex_unlock(&client->list_mtx);
 
-      printf("Message received and added to queue. Queue length: %ld\n", client->msg_Q.len);
+      /*printf("Message received and added to queue. Queue length: %ld\n", client->msg_Q.len);
       printf("Messeges in queue:\n");
       for (size_t i = 0; i < client->msg_Q.len; i++) {
         size_t index = (client->msg_Q.head + i) % QQ_MESS;
@@ -310,7 +368,7 @@ void *mqClientRecwThread(mqClient *client) {
                (int)queued_msg->topic.len, queued_msg->topic.prt,
                (int)queued_msg->client.len, queued_msg->client.prt,
                (int)queued_msg->msg.len, queued_msg->msg.prt);
-      }
+      }*/
 
       //mqMsgHdr msg_hdr = mqMsgHdrFrom(bufmsg);
       //printf("Received message with due timestamp: %u, client length: %u, topic length: %u, message length: %u\n",
@@ -335,14 +393,39 @@ void *mqClientRecwThread(mqClient *client) {
 }
 
 mqStr mqClientName(mqClient *client) { return client->name; }
-int mqClientRecv(mqClient *client, mqMsg **msg) {
-  for (;;) {
+void mqClientRecv(mqClient *client, mqMsg **msg) {
+  //for (;;) {
     // mutex lok if client ma msg retur mgs;
     // mutex unlok sleep(10)
-  }
+  //}
   // czyj jest już jakaś wiadomość jeśli tak to zwraca jeśli nie to czyta z
   // sieci
   //
   //
+  for (;;) {
+    pthread_mutex_lock(&client->list_mtx);
+    while(client->msg_Q.len > 0)
+    {
+      QMsgPop(&client->msg_Q, msg);
+      //printf("  Topic: %.*s, Client: %.*s, Msg: %.*s\n",
+      //  (int)msg->topic.len, msg->topic.prt,
+      //  (int)msg->client.len, msg->client.prt,
+      //  (int)msg->msg.len, msg->msg.prt);
+      //free(msg);
+      pthread_mutex_unlock(&client->list_mtx);
+      return;
+    }
+
+    //printf("lock2od\n");
+
+    pthread_mutex_unlock(&client->list_mtx);
+    usleep(10000);
+  }
 }
-int mqClientRecvFree(mqClient *client, mqMsg **msg) {}
+int mqClientRecvFree(mqClient *client, mqMsg **msg) {
+  free((*msg)->client.prt);
+  free((*msg)->topic.prt);
+  free((*msg)->msg.prt);
+  free(*msg);
+  return 0;
+}
